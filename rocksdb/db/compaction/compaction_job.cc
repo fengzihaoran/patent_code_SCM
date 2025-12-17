@@ -1918,6 +1918,7 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
       target_path_id = path_cold;
   }
 
+  // std::string fname = GetTableFileName(file_number);
   // 5. 生成文件名 (使用计算出的 target_path_id)
   std::string fname = TableFileName(cf_paths, file_number, target_path_id);
   // [Debug Log] 打印日志来验证，不能改文件名
@@ -1926,8 +1927,6 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
       out_level, target_path_id, fname.c_str());
   // ============================================================================================
 
-
-  // std::string fname = GetTableFileName(file_number);
 
   // Fire events.
   ColumnFamilyData* cfd = sub_compact->compaction->column_family_data();
