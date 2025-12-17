@@ -373,11 +373,11 @@ void RocksdbDB::GetOptions(const utils::Properties &props, rocksdb::Options *opt
     }
 
     /* [Patent Logic] */
-    opt->write_buffer_size = 128 * 1024 * 1024; // 128MB
+    opt->write_buffer_size = 128ULL * 1024 * 1024; // 128MB
     opt->level0_file_num_compaction_trigger = 4;
     opt->max_bytes_for_level_base = 1ULL * 1024 * 1024 * 1024; // 2GB
-    opt->target_file_size_base = 64 * 1024 * 1024; // 64MB SST文件大小
-    opt->max_total_wal_size = 256 * 1024 * 1024;
+    opt->target_file_size_base = 64ULL * 1024 * 1024; // 64MB SST文件大小
+    opt->max_total_wal_size = 256ULL * 1024 * 1024;  // cap WAL total size
     // 2. 配置物理隔离路径 (Path Mapping)
     opt->db_paths.clear();
     // [路径 0: Optane SSD] (物理路径)

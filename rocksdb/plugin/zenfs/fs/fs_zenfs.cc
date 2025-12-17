@@ -1526,9 +1526,18 @@ std::string ZenFS::ToAuxPath(std::string path) {
   // if (path.find("optane") != std::string::npos) {
     // 可以在这里加个打印，但这会刷屏，建议调试通了就注释掉
     // fprintf(stderr, "[ZenFS Router] Passthrough: %s\n", path.c_str());
-  return path;
+  // return path;
   // }
   // return superblock_->GetAuxFsPath() + path;
+  std::string p = FormatPathLexically(path);
+
+  if (IsOptanePath(p)) return p;
+  if (p.find("zenfs_data") != std::string::npos) return p;
+
+  std::string aux = superblock_->GetAuxFsPath();
+  if (!aux.empty() && aux.back() == '/') aux.pop_back();
+  if (!p.empty() && p.front() != '/') p = "/" + p;
+  return aux + p;
   // --- [Patent Logic End] ---
 }
 
