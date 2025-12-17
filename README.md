@@ -1,0 +1,1 @@
+# patent_code_SCM
