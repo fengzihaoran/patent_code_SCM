@@ -1859,73 +1859,98 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
   uint64_t file_number = versions_->NewFileNumber();
 
 
-  // ================= [Patent/Paper Innovation: Semantic-Aware Admission Control] =================
-  // 1. 获取路径配置信息
-  const auto& cf_paths = sub_compact->compaction->immutable_options()->cf_paths;
-  uint32_t path_hot = 0; // Optane
-  // 如果有多个路径，最后一个默认为 ZNS (Cold Tier)
+  // =================================================================================
+  // [Patent Logic] Dual-Modal Offloading (Space + Hotness)
+  // Adjusted for: L1=2GB, Optane=4GB, SST=64MB
+  // =================================================================================
+  const auto& cf_paths = compact_->compaction->immutable_options()->cf_paths;
+  uint32_t target_path_id = 0;
   uint32_t path_cold = (cf_paths.size() > 1) ? static_cast<uint32_t>(cf_paths.size() - 1) : 0;
 
-  // 2. 默认策略：尝试去热层 (Optane)
-  uint32_t target_path_id = path_hot;
-
-  // 3. 获取决策因子
-  int out_level = sub_compact->compaction->output_level();
-
-  // 估算输出文件大小 (使用输入文件总大小作为保守上限)
-  uint64_t est_output_size = 0;
-  for (size_t i = 0; i < sub_compact->compaction->num_input_levels(); i++) {
-    const auto& files = *sub_compact->compaction->inputs(i);
-    for (const auto* f : files) {
-      est_output_size += f->fd.GetFileSize(); // adjust to your API
-    }
+  // [Rule 1] L2+ (Cold Tiers) 强制去 ZNS
+  if (sub_compact->compaction->output_level() >= 2) {
+      target_path_id = path_cold;
   }
-
-  // 4. 执行准入算法 (Admission Policy)
-  bool bypass_to_cold = false;
-
-  // [Rule 1: Data Lifetime] L2 及以上的数据视为冷数据，强制去 ZNS
-  if (out_level >= 2) {
-      bypass_to_cold = true;
-  }
-
-  // [Rule 2: Traffic Shaping] 如果是 L1 输出且文件可能巨大 (>128MB)，防止污染 SCM，去 ZNS
-  // 注意：这里使用硬编码 128MB 作为阈值，论文中可作为参数 Discussion
-  const uint64_t kBypassThres = 128ULL * 1024 * 1024;
-  if (!bypass_to_cold && out_level == 1 && est_output_size > kBypassThres) {
-      bypass_to_cold = true;
-  }
-
-  // [Rule 3: Space Guard] 空间保护机制
-  // 如果决定去 Optane，但 Optane 剩余空间不足 (预估输出 + 256MB 安全余量)，强制降级
-  if (!bypass_to_cold && target_path_id == path_hot) {
+  // [Rule 2] L0/L1 智能调度
+  else if (cf_paths.size() > 1) {
       uint64_t free_space = 0;
-      // 获取 Optane 挂载点剩余空间
-      Status s = rocksdb::Env::Default()->GetFreeSpace(cf_paths[path_hot].path, &free_space);
-      if (s.ok()) {
-          uint64_t safety_margin = 256ULL * 1024 * 1024;
-          // 如果剩余空间 < (预估 64MB + 256MB)，则认为危险
-          if (free_space < (est_output_size + safety_margin)) {
-              bypass_to_cold = true;
-              ROCKS_LOG_WARN(db_options_.info_log,
-                  "[Admission] SCM Full! Spilling L%d output to ZNS. Free: %" PRIu64,
-                  out_level, free_space);
+      // 必须用 Env::Default()
+      Status s_space = rocksdb::Env::Default()->GetFreeSpace(cf_paths[0].path, &free_space);
+
+      // 寻找最老数据时间
+      uint64_t oldest_time = std::numeric_limits<uint64_t>::max();
+      int64_t cur_timeInt = 0;
+      db_options_.clock->GetCurrentTime(&cur_timeInt);
+      const uint64_t current_time = static_cast<uint64_t>(cur_timeInt);
+
+      for (size_t i = 0; i < sub_compact->compaction->num_input_levels(); i++) {
+          if (sub_compact->compaction->num_input_files(i) > 0) {
+              const auto& inputs = *sub_compact->compaction->inputs(i);
+              for (const auto* f : inputs) {
+                  if (f->oldest_ancester_time != 0 && f->oldest_ancester_time < oldest_time) {
+                      oldest_time = f->oldest_ancester_time;
+                  }
+              }
+          }
+      }
+
+      uint64_t data_age_sec = (oldest_time != std::numeric_limits<uint64_t>::max() && current_time > oldest_time)
+                              ? (current_time - oldest_time) : 0;
+
+      if (s_space.ok()) {
+          // [Tuned Param] 384MB: 适配 384MB WAL 限制
+          const uint64_t kRedThreshold = 512ULL * 1024 * 1024;
+          // [Tuned Param] 1.5GB: 适配 2GB L1 Base
+          const uint64_t kYellowThreshold = 1536ULL * 1024 * 1024;
+          const uint64_t kColdAgeThreshold = 600; // 10分钟
+
+          bool migrate = false;
+          double pressure_score = 0.0;
+          double age_score = 0.0;
+
+          // 1. 空间分
+          if (free_space < kRedThreshold) {
+              pressure_score = 100.0;
+          } else if (free_space < kYellowThreshold) {
+              pressure_score = 1.0 - (double)(free_space - kRedThreshold) /
+                                     (double)(kYellowThreshold - kRedThreshold);
+          }
+
+          // 2. 时效分
+          if (data_age_sec > kColdAgeThreshold) {
+              // 每多老 1分钟，增加 ~16% 概率
+              age_score = std::min(1.0, (double)(data_age_sec - kColdAgeThreshold) / 360.0);
+          }
+
+          // 3. 综合打分 (空间权重 0.7, 寿命权重 0.3)
+          double total_score = (pressure_score * 0.7) + (age_score * 0.3);
+
+          // 强制保护
+          if (free_space < kRedThreshold) {
+              migrate = true;
+              ROCKS_LOG_WARN(db_options_.info_log, "[Admission] FORCE Red. Free: %" PRIu64, free_space);
+          }
+          else {
+              // 确定性采样
+              uint64_t sample = file_number % 100;
+              if (sample < (total_score * 100)) {
+                  migrate = true;
+                  ROCKS_LOG_INFO(db_options_.info_log,
+                      "[Admission] SMOOTH. Score: %.2f (P:%.2f, A:%.2f). Sample: %" PRIu64,
+                      total_score, pressure_score, age_score, sample);
+              }
+          }
+
+          if (migrate) {
+              target_path_id = path_cold;
           }
       }
   }
 
-  if (bypass_to_cold) {
-      target_path_id = path_cold;
-  }
-
-  // std::string fname = GetTableFileName(file_number);
-  // 5. 生成文件名 (使用计算出的 target_path_id)
+  // sub_compact->compaction->SetOutputPathId(target_path_id);
+  // meta.fd = FileDescriptor(file_number, target_path_id, 0);
   std::string fname = TableFileName(cf_paths, file_number, target_path_id);
-  // [Debug Log] 打印日志来验证，不能改文件名
-  ROCKS_LOG_INFO(db_options_.info_log,
-      "[Paper Debug] Generated SST: Level=%d, Path=%d, File=%s",
-      out_level, target_path_id, fname.c_str());
-  // ============================================================================================
+  // =================================================================================
 
 
   // Fire events.
