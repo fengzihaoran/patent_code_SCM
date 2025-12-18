@@ -57,6 +57,7 @@
 #include "test_util/sync_point.h"
 #include "util/stop_watch.h"
 
+#include <sys/statvfs.h>
 namespace ROCKSDB_NAMESPACE {
 
 const char* GetCompactionReasonString(CompactionReason compaction_reason) {
@@ -1868,7 +1869,8 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
   uint32_t path_cold = (cf_paths.size() > 1) ? static_cast<uint32_t>(cf_paths.size() - 1) : 0;
 
   // [Rule 1] L2+ (Cold Tiers) 强制去 ZNS
-  if (sub_compact->compaction->output_level() >= 2) {
+  int out_level = sub_compact->compaction->output_level();
+  if (out_level >= 2) {
       target_path_id = path_cold;
   }
   // [Rule 2] L0/L1 智能调度
@@ -1898,58 +1900,97 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
                               ? (current_time - oldest_time) : 0;
 
       if (s_space.ok()) {
-          // [Tuned Param] 384MB: 适配 384MB WAL 限制
-          const uint64_t kRedThreshold = 512ULL * 1024 * 1024;
-          // [Tuned Param] 1.5GB: 适配 2GB L1 Base
-          const uint64_t kYellowThreshold = 1536ULL * 1024 * 1024;
-          const uint64_t kColdAgeThreshold = 600; // 10分钟
+        // [Tuned Param] 384MB: 适配 384MB WAL 限制
+        const uint64_t kRedThreshold = 512ULL * 1024 * 1024;
+        // [Tuned Param] 1.5GB: 适配 2GB L1 Base
+        // [Yellow]: 动态设定为总容量的 40%
+        // 4GB -> 1.6GB (接近之前的 1.5GB)
+        // 2GB -> 800MB
+        // 1GB -> 400MB (此时 Yellow < Red，意味着全程 Red，符合预期)
+        // -----------------------------------------------------------------
+        // [Dynamic Thresholds] 动态计算阈值
+        // -----------------------------------------------------------------
+        static const uint64_t kYellowThreshold = []() {
+          uint64_t capacity = 0;
+          const char* env_scm_gb = std::getenv("SCM_GB");
 
-          bool migrate = false;
-          double pressure_score = 0.0;
-          double age_score = 0.0;
+          if (env_scm_gb) {
+            // 1. 优先使用环境变量模拟的大小
+            capacity = std::stoull(env_scm_gb) * 1024 * 1024 * 1024;
+          } else {
+            // 2. 自动探测物理磁盘大小
+            struct statvfs stat;
+            // 这里可以直接硬编码挂载点，因为 Optane 路径通常是固定的
+            if (statvfs("/home/femu/mnt/optane", &stat) == 0) {
+              capacity = (uint64_t)stat.f_blocks * stat.f_frsize;
+            } else {
+              capacity = 4ULL * 1024 * 1024 * 1024; // Fallback 4GB
+            }
+          }
 
-          // 1. 空间分
-          if (free_space < kRedThreshold) {
-              pressure_score = 100.0;
-          } else if (free_space < kYellowThreshold) {
-              pressure_score = 1.0 - (double)(free_space - kRedThreshold) /
+          // 计算黄线 (35%)
+          uint64_t yellow = static_cast<uint64_t>(capacity * 0.35);
+
+          // 确保黄线在红线之上
+          if (yellow <= kRedThreshold) {
+            yellow = kRedThreshold + (100ULL * 1024 * 1024); // 至少比红线多 100MB
+          }
+
+          return yellow;
+        }();
+        const uint64_t kColdAgeThreshold = 600;  // 10分钟
+
+        bool migrate = false;
+        double pressure_score = 0.0;
+        double age_score = 0.0;
+
+        // 1. 空间分
+        if (free_space < kRedThreshold) {
+          pressure_score = 100.0;
+        } else if (free_space < kYellowThreshold) {
+          pressure_score = 1.0 - (double)(free_space - kRedThreshold) /
                                      (double)(kYellowThreshold - kRedThreshold);
-          }
+        }
 
-          // 2. 时效分
-          if (data_age_sec > kColdAgeThreshold) {
-              // 每多老 1分钟，增加 ~16% 概率
-              age_score = std::min(1.0, (double)(data_age_sec - kColdAgeThreshold) / 360.0);
-          }
+        // 2. 时效分
+        if (data_age_sec > kColdAgeThreshold) {
+          // 每多老 1分钟，增加 ~16% 概率
+          age_score =
+              std::min(1.0, (double)(data_age_sec - kColdAgeThreshold) / 360.0);
+        }
 
-          // 3. 综合打分 (空间权重 0.7, 寿命权重 0.3)
-          double total_score = (pressure_score * 0.7) + (age_score * 0.3);
+        // 3. 综合打分 (空间权重 0.7, 寿命权重 0.3)
+        double total_score = (pressure_score * 0.7) + (age_score * 0.3);
 
-          // 强制保护
-          if (free_space < kRedThreshold) {
-              migrate = true;
-              ROCKS_LOG_WARN(db_options_.info_log, "[Admission] FORCE Red. Free: %" PRIu64, free_space);
+        // 强制保护
+        if (free_space < kRedThreshold) {
+          migrate = true;
+          ROCKS_LOG_WARN(db_options_.info_log,
+                         "[Admission] FORCE Red. Free: %" PRIu64, free_space);
+        } else {
+          // 确定性采样
+          uint64_t sample = file_number % 100;
+          if (sample < (total_score * 100)) {
+            migrate = true;
+            ROCKS_LOG_INFO(db_options_.info_log,
+                           "[Admission] SMOOTH. Score: %.2f (P:%.2f, A:%.2f). "
+                           "Sample: %" PRIu64,
+                           total_score, pressure_score, age_score, sample);
           }
-          else {
-              // 确定性采样
-              uint64_t sample = file_number % 100;
-              if (sample < (total_score * 100)) {
-                  migrate = true;
-                  ROCKS_LOG_INFO(db_options_.info_log,
-                      "[Admission] SMOOTH. Score: %.2f (P:%.2f, A:%.2f). Sample: %" PRIu64,
-                      total_score, pressure_score, age_score, sample);
-              }
-          }
+        }
 
-          if (migrate) {
-              target_path_id = path_cold;
-          }
+        if (migrate) {
+          target_path_id = path_cold;
+        }
       }
   }
 
   // sub_compact->compaction->SetOutputPathId(target_path_id);
   // meta.fd = FileDescriptor(file_number, target_path_id, 0);
   std::string fname = TableFileName(cf_paths, file_number, target_path_id);
+  ROCKS_LOG_INFO(db_options_.info_log,
+    "[Paper Debug] Generated SST: Level=%d, Path=%d, File=%s",
+    out_level, target_path_id, fname.c_str());
   // =================================================================================
 
 

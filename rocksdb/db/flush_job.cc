@@ -47,6 +47,7 @@
 #include "util/mutexlock.h"
 #include "util/stop_watch.h"
 
+#include <sys/statvfs.h>
 namespace ROCKSDB_NAMESPACE {
 
 const char* GetFlushReasonString(FlushReason flush_reason) {
@@ -987,56 +988,91 @@ Status FlushJob::WriteLevel0Table() {
           Status s_space = rocksdb::Env::Default()->GetFreeSpace(cf_paths[0].path, &free_space);
 
           if (s_space.ok()) {
-            // [Tuned Param 2025-12-18]WAL 上限 256MB + 128MB 缓冲 = 384MB 足够安全
-            // 降低 Red 线：WAL 限制为 256MB，所以保留 384MB 足够安全
-              const uint64_t kRedThreshold = 512ULL * 1024 * 1024;
+            // -----------------------------------------------------------------
+            // [Dynamic Thresholds] 动态计算阈值
+            // -----------------------------------------------------------------
+            // [Tuned Param 2025-12-18]WAL 上限 256MB + 128MB 缓冲 = 384MB
+            // 足够安全 降低 Red 线：WAL 限制为 512MB
+            const uint64_t kRedThreshold = 512ULL * 1024 * 1024;
+            static const uint64_t kYellowThreshold = []() {
+              uint64_t capacity = 0;
+              const char* env_scm_gb = std::getenv("SCM_GB");
 
-              // [Config Tuned] 基于 max_bytes_for_level_base = 2GB (L1)
-              // Optane 4GB - 1.5GB(Used) = 1.5GB(Free). 当用量超过 1.5GB (接近 L1 容量) 时启动分流
-              const uint64_t kYellowThreshold = 1536ULL * 1024 * 1024;
-
-              bool migrate_to_cold = false;
-
-              // 1. 获取最老数据时间 (用于判断这个 Memtable 是否在内存里赖了很久)
-              uint64_t oldest_time = meta_.oldest_ancester_time;
-              uint64_t flush_age = (current_time > oldest_time) ? (current_time - oldest_time) : 0;
-
-              // 如果 Flush 的数据在内存里积压超过 300s，视为"温冷数据"，优先去 ZNS
-              bool is_cold_flush = (flush_age > 300);
-
-              // --- 决策状态机 ---
-              if (free_space < kRedThreshold) {
-                  // [RED] 紧急避险：保护 WAL 写入，强制去 ZNS
-                  migrate_to_cold = true;
-                  ROCKS_LOG_WARN(db_options_.info_log,
-                      "[Flush] State: RED. Free: %" PRIu64 " B (< 512MB). FORCE spillover.", free_space);
+              if (env_scm_gb) {
+                // 1. 优先使用环境变量模拟的大小
+                capacity = std::stoull(env_scm_gb) * 1024 * 1024 * 1024;
+              } else {
+                // 2. 自动探测物理磁盘大小
+                struct statvfs stat;
+                // 这里可以直接硬编码挂载点，因为 Optane 路径通常是固定的
+                if (statvfs("/home/femu/mnt/optane", &stat) == 0) {
+                  capacity = (uint64_t)stat.f_blocks * stat.f_frsize;
+                } else {
+                  capacity = 4ULL * 1024 * 1024 * 1024; // Fallback 4GB
+                }
               }
-              else if (free_space < kYellowThreshold) {
-                  // [YELLOW] 平滑迁移：空间越少，去 ZNS 概率越高
-                  // Pressure 0.0 (剩2.5GB) -> 1.0 (剩0.5GB)
-                  double pressure = 1.0 - (double)(free_space - kRedThreshold) /
-                                          (double)(kYellowThreshold - kRedThreshold);
-                  if (pressure < 0) pressure = 0;
 
-                  // 确定性采样 (Mod 100)
-                  uint64_t sample = meta_.fd.GetNumber() % 100;
+              // 计算黄线 (35%)
+              uint64_t yellow = static_cast<uint64_t>(capacity * 0.35);
 
-                  // 触发条件：
-                  // 1. 命中概率 (sample < pressure * 100)
-                  // 2. 或者数据本身偏冷 (is_cold_flush) 且有一定压力 (pressure > 0.1)
-                  if (sample < (pressure * 100) || (is_cold_flush && pressure > 0.1)) {
-                      migrate_to_cold = true;
-                      ROCKS_LOG_INFO(db_options_.info_log,
-                          "[Flush] State: YELLOW. Pressure: %.2f, Age: %" PRIu64 "s. To ZNS.",
-                          pressure, flush_age);
-                  }
+              // 确保黄线在红线之上
+              if (yellow <= kRedThreshold) {
+                yellow = kRedThreshold + (100ULL * 1024 * 1024); // 至少比红线多 100MB
               }
-              // [GREEN] 空间充足 (>2.5GB)，默认留给 Optane
 
-              if (migrate_to_cold) {
-                  uint32_t path_cold = static_cast<uint32_t>(cf_paths.size() - 1);
-                  meta_.fd = FileDescriptor(meta_.fd.GetNumber(), path_cold, 0);
+              return yellow;
+            }();
+
+            bool migrate_to_cold = false;
+
+            // 1. 获取最老数据时间 (用于判断这个 Memtable 是否在内存里赖了很久)
+            uint64_t oldest_time = meta_.oldest_ancester_time;
+            uint64_t flush_age =
+                (current_time > oldest_time) ? (current_time - oldest_time) : 0;
+
+            // 如果 Flush 的数据在内存里积压超过 300s，视为"温冷数据"，优先去
+            // ZNS
+            bool is_cold_flush = (flush_age > 300);
+
+            // --- 决策状态机 ---
+            if (free_space < kRedThreshold) {
+              // [RED] 紧急避险：保护 WAL 写入，强制去 ZNS
+              migrate_to_cold = true;
+              ROCKS_LOG_WARN(db_options_.info_log,
+                             "[Flush] State: RED. Free: %" PRIu64
+                             " B (< 512MB). FORCE spillover.",
+                             free_space);
+            } else if (free_space < kYellowThreshold) {
+              // [YELLOW] 平滑迁移：空间越少，去 ZNS 概率越高
+              // Pressure 0.0 (剩2.5GB) -> 1.0 (剩0.5GB)
+              double pressure =
+                  1.0 - (double)(free_space - kRedThreshold) /
+                            (double)(kYellowThreshold - kRedThreshold);
+              if (pressure < 0) pressure = 0;
+
+              // 确定性采样 (Mod 100)
+              uint64_t sample = meta_.fd.GetNumber() % 100;
+
+              // 触发条件：
+              // 1. 命中概率 (sample < pressure * 100)
+              // 2. 或者数据本身偏冷 (is_cold_flush) 且有一定压力 (pressure >
+              // 0.1)
+              if (sample < (pressure * 100) ||
+                  (is_cold_flush && pressure > 0.1)) {
+                migrate_to_cold = true;
+                ROCKS_LOG_INFO(
+                    db_options_.info_log,
+                    "[Flush] State: YELLOW. Pressure: %.2f, Age: %" PRIu64
+                    "s. To ZNS.",
+                    pressure, flush_age);
               }
+            }
+            // [GREEN] 空间充足 (>2.5GB)，默认留给 Optane
+
+            if (migrate_to_cold) {
+              uint32_t path_cold = static_cast<uint32_t>(cf_paths.size() - 1);
+              meta_.fd = FileDescriptor(meta_.fd.GetNumber(), path_cold, 0);
+            }
           }
       }
       // =================================================================================

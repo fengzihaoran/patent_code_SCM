@@ -19,6 +19,10 @@
 #include <rocksdb/utilities/options_util.h>
 #include <rocksdb/write_batch.h>
 
+//patent code_Start
+#include <sys/statvfs.h>
+//patent code_End
+
 namespace {
   const std::string PROP_NAME = "rocksdb.dbname";
   const std::string PROP_NAME_DEFAULT = "";
@@ -106,6 +110,11 @@ namespace {
 
   const std::string PROP_SYNC = "rocksdb.sync";
   const std::string PROP_SYNC_DEFAULT = "false";
+
+  //patent code_Start
+  // const std::string PROP_SCMGB = "rocksdb.SCM_GB";
+  // const std::string PROP_SCMGB_DEFAULT = "4";
+  //patent code_End
 
   static std::shared_ptr<rocksdb::Env> env_guard;
   static std::shared_ptr<rocksdb::Cache> block_cache;
@@ -385,8 +394,35 @@ void RocksdbDB::GetOptions(const utils::Properties &props, rocksdb::Options *opt
     // 计算逻辑：2GB (L1) + 0.5GB (L0) + 1GB (Compaction 缓冲/安全余量) = 3.5GB
     // 一旦总使用量超过 3.5GB，RocksDB 就会强制将新生成的 SST (即 L2) 写到下一个路径。
     // 这完美适配你的 4GB 物理盘，留出了 500MB 防止文件系统写满崩溃。
-    uint64_t optane_limit = 3584ULL * 1024 * 1024; // 3.5 GB
-    opt->db_paths.emplace_back("/home/femu/mnt/optane", optane_limit);
+
+    // [Dynamic Config] 获取 Optane 目标大小
+    uint64_t optane_capacity = 0;
+
+    /// 1. 如果设置了环境变量，优先使用（软件模拟大小）
+    // if (props.GetProperty(PROP_SCMGB, PROP_SCMGB_DEFAULT) == "true") {
+    //   optane_capacity = 4ULL * 1024 * 1024 * 1024;
+    //   // fprintf(stderr, "====== [DEBUG] optane_capacity: [%lu] ======\n", optane_capacity);
+    // }
+    // 1. 如果设置了环境变量，优先使用（软件模拟大小）
+    const char* env_scm_gb = std::getenv("SCM_GB");
+    if (env_scm_gb) {
+      // 1. 如果设置了环境变量，优先使用（软件模拟大小）
+      optane_capacity = std::stoull(env_scm_gb) * 1024 * 1024 * 1024;
+    }
+    else {
+      // 2. 否则，自动探测挂载点的物理大小
+      struct statvfs stat;
+      if (statvfs("/home/femu/mnt/optane", &stat) == 0) {
+        optane_capacity = stat.f_blocks * stat.f_frsize;
+        // fprintf(stderr, "====== [DEBUG] optane_capacity: [%lu] ======\n", optane_capacity);
+      } else {
+        optane_capacity = 4ULL * 1024 * 1024 * 1024; // Fallback 4GB
+      }
+    }
+
+
+    // uint64_t optane_limit = 4ULL * 1024 * 1024 * 1024; // 4 GB
+    opt->db_paths.emplace_back("/home/femu/mnt/optane", optane_capacity);
 
     // [路径 1: ZNS SSD] (ZenFS 虚拟路径)
     // 承接所有溢出的冷数据 (L2, L3...)
