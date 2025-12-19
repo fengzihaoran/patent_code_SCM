@@ -1899,8 +1899,8 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
                               ? (current_time - oldest_time) : 0;
 
       if (s_space.ok()) {
-        // [Tuned Param] 2GB: 适配 1GB WAL 限制
-        const uint64_t kRedThreshold = 2ULL * 1024 * 1024 * 1024;
+        // [Tuned Param] 1.5GB: 适配 1GB WAL 限制
+        const uint64_t kRedThreshold = 1024ULL * 1024 * 1024;
         const uint64_t kColdAgeThreshold = 300;  // 5分钟
         bool migrate = false;
         // [Tuned Param] 1.5GB: 适配 2GB L1 Base

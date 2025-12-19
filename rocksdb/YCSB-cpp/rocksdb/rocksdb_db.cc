@@ -383,12 +383,13 @@ void RocksdbDB::GetOptions(const utils::Properties &props, rocksdb::Options *opt
 
     /* [Patent Logic] */
     opt->write_buffer_size = 128ULL * 1024 * 1024; // 128MB、memtable（内存写缓冲区）的大小，达到该阈值会触发刷盘（落盘到 SST 文件）；
-    opt->level0_file_num_compaction_trigger = 12; //当 Level 0 层的 SST 文件数量达到 12 个时，触发 Level 0 到 Level 1 的 Compaction（数据压缩 / 合并操作）。
+    opt->target_file_size_base = 256ULL * 1024 * 1024; // 256MB SST文件大小
+    opt->level0_file_num_compaction_trigger = 10; //当 Level 0 层的 SST 文件数量达到 10 个时，触发 Level 0 到 Level 1 的 Compaction（数据压缩 / 合并操作）。
+    opt->level0_slowdown_writes_trigger = 30; //当 Level 0 的 SST 文件数量达到 30 个时，触发写减速机制
+    opt->level0_stop_writes_trigger = 50; //当 Level 0 的 SST 文件数量达到 50 个时，触发写停止机制。
     opt->max_bytes_for_level_base = 6ULL * 1024 * 1024 * 1024; // Level 1 层的总大小:6GB
-    opt->target_file_size_base = 512ULL * 1024 * 1024; // 512MB SST文件大小
-    opt->max_total_wal_size = 1ULL * 1024 * 1024 * 1024;  // cap WAL total size
-    opt->level0_slowdown_writes_trigger = 36; //当 Level 0 的 SST 文件数量达到 36 个时，触发写减速机制
-    opt->level0_stop_writes_trigger = 60; //当 Level 0 的 SST 文件数量达到 60 个时，触发写停止机制。
+    opt->max_total_wal_size = 1ULL * 1024 * 1024 * 1024;  // cap WAL total size  1GB
+
     // 2. 配置物理隔离路径 (Path Mapping)
     opt->db_paths.clear();
     // [路径 0: Optane SSD] (物理路径)
@@ -418,7 +419,7 @@ void RocksdbDB::GetOptions(const utils::Properties &props, rocksdb::Options *opt
         optane_capacity = stat.f_blocks * stat.f_frsize;
         // fprintf(stderr, "====== [DEBUG] optane_capacity: [%lu] ======\n", optane_capacity);
       } else {
-        optane_capacity = 4ULL * 1024 * 1024 * 1024; // Fallback 4GB
+        optane_capacity = 16ULL * 1024 * 1024 * 1024; // Fallback 4GB
       }
     }
 
