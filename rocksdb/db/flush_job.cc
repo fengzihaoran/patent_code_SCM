@@ -991,10 +991,9 @@ Status FlushJob::WriteLevel0Table() {
             // -----------------------------------------------------------------
             // [Dynamic Thresholds] 动态计算阈值
             // -----------------------------------------------------------------
-            // [Tuned Param 2025-12-18]WAL 上限 256MB + 128MB 缓冲 = 384MB
-            // 足够安全 降低 Red 线：WAL 限制为 512MB
-            const uint64_t kRedThreshold = 512ULL * 1024 * 1024;
-            static const uint64_t kYellowThreshold = []() {
+            // 足够安全 降低 Red 线：WAL 限制为 1GB
+            const uint64_t kRedThreshold = 2ULL * 1024 * 1024 * 1024;
+            static const uint64_t kYellowThreshold = [cf_paths]() {
               uint64_t capacity = 0;
               const char* env_scm_gb = std::getenv("SCM_GB");
 
@@ -1005,15 +1004,15 @@ Status FlushJob::WriteLevel0Table() {
                 // 2. 自动探测物理磁盘大小
                 struct statvfs stat;
                 // 这里可以直接硬编码挂载点，因为 Optane 路径通常是固定的
-                if (statvfs("/home/femu/mnt/optane", &stat) == 0) {
+                if (statvfs(cf_paths[0].path.c_str(), &stat) == 0) {
                   capacity = (uint64_t)stat.f_blocks * stat.f_frsize;
                 } else {
-                  capacity = 4ULL * 1024 * 1024 * 1024; // Fallback 4GB
+                  capacity = 16ULL * 1024 * 1024 * 1024; // Fallback 16GB
                 }
               }
 
-              // 计算黄线 (35%)
-              uint64_t yellow = static_cast<uint64_t>(capacity * 0.35);
+              // 计算黄线 (38%)
+              uint64_t yellow = static_cast<uint64_t>(capacity * 0.38);
 
               // 确保黄线在红线之上
               if (yellow <= kRedThreshold) {
@@ -1022,7 +1021,6 @@ Status FlushJob::WriteLevel0Table() {
 
               return yellow;
             }();
-
             bool migrate_to_cold = false;
 
             // 1. 获取最老数据时间 (用于判断这个 Memtable 是否在内存里赖了很久)
@@ -1030,9 +1028,9 @@ Status FlushJob::WriteLevel0Table() {
             uint64_t flush_age =
                 (current_time > oldest_time) ? (current_time - oldest_time) : 0;
 
-            // 如果 Flush 的数据在内存里积压超过 300s，视为"温冷数据"，优先去
+            // 如果 Flush 的数据在内存里积压超过 180s，视为"温冷数据"，优先去
             // ZNS
-            bool is_cold_flush = (flush_age > 300);
+            bool is_cold_flush = (flush_age > 180);
 
             // --- 决策状态机 ---
             if (free_space < kRedThreshold) {
@@ -1040,7 +1038,7 @@ Status FlushJob::WriteLevel0Table() {
               migrate_to_cold = true;
               ROCKS_LOG_WARN(db_options_.info_log,
                              "[Flush] State: RED. Free: %" PRIu64
-                             " B (< 512MB). FORCE spillover.",
+                             " B (< 1GB). FORCE spillover.",
                              free_space);
             } else if (free_space < kYellowThreshold) {
               // [YELLOW] 平滑迁移：空间越少，去 ZNS 概率越高

@@ -1895,13 +1895,14 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
               }
           }
       }
-
       uint64_t data_age_sec = (oldest_time != std::numeric_limits<uint64_t>::max() && current_time > oldest_time)
                               ? (current_time - oldest_time) : 0;
 
       if (s_space.ok()) {
-        // [Tuned Param] 384MB: 适配 384MB WAL 限制
-        const uint64_t kRedThreshold = 512ULL * 1024 * 1024;
+        // [Tuned Param] 2GB: 适配 1GB WAL 限制
+        const uint64_t kRedThreshold = 2ULL * 1024 * 1024 * 1024;
+        const uint64_t kColdAgeThreshold = 300;  // 5分钟
+        bool migrate = false;
         // [Tuned Param] 1.5GB: 适配 2GB L1 Base
         // [Yellow]: 动态设定为总容量的 40%
         // 4GB -> 1.6GB (接近之前的 1.5GB)
@@ -1910,7 +1911,7 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
         // -----------------------------------------------------------------
         // [Dynamic Thresholds] 动态计算阈值
         // -----------------------------------------------------------------
-        static const uint64_t kYellowThreshold = []() {
+        static const uint64_t kYellowThreshold = [cf_paths]() {
           uint64_t capacity = 0;
           const char* env_scm_gb = std::getenv("SCM_GB");
 
@@ -1921,15 +1922,15 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
             // 2. 自动探测物理磁盘大小
             struct statvfs stat;
             // 这里可以直接硬编码挂载点，因为 Optane 路径通常是固定的
-            if (statvfs("/home/femu/mnt/optane", &stat) == 0) {
+            if (statvfs(cf_paths[0].path.c_str(), &stat) == 0) {
               capacity = (uint64_t)stat.f_blocks * stat.f_frsize;
             } else {
-              capacity = 4ULL * 1024 * 1024 * 1024; // Fallback 4GB
+              capacity = 16ULL * 1024 * 1024 * 1024; // Fallback 16GB
             }
           }
 
-          // 计算黄线 (35%)
-          uint64_t yellow = static_cast<uint64_t>(capacity * 0.35);
+          // 计算黄线 (38%)
+          uint64_t yellow = static_cast<uint64_t>(capacity * 0.38);
 
           // 确保黄线在红线之上
           if (yellow <= kRedThreshold) {
@@ -1938,44 +1939,32 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
 
           return yellow;
         }();
-        const uint64_t kColdAgeThreshold = 600;  // 10分钟
-
-        bool migrate = false;
-        double pressure_score = 0.0;
-        double age_score = 0.0;
 
         // 1. 空间分
         if (free_space < kRedThreshold) {
-          pressure_score = 100.0;
-        } else if (free_space < kYellowThreshold) {
-          pressure_score = 1.0 - (double)(free_space - kRedThreshold) /
-                                     (double)(kYellowThreshold - kRedThreshold);
-        }
-
-        // 2. 时效分
-        if (data_age_sec > kColdAgeThreshold) {
-          // 每多老 1分钟，增加 ~16% 概率
-          age_score =
-              std::min(1.0, (double)(data_age_sec - kColdAgeThreshold) / 360.0);
-        }
-
-        // 3. 综合打分 (空间权重 0.7, 寿命权重 0.3)
-        double total_score = (pressure_score * 0.7) + (age_score * 0.3);
-
-        // 强制保护
-        if (free_space < kRedThreshold) {
+          // [RED State] 红色保命：无条件强制迁移
           migrate = true;
-          ROCKS_LOG_WARN(db_options_.info_log,
-                         "[Admission] FORCE Red. Free: %" PRIu64, free_space);
-        } else {
-          // 确定性采样
+          ROCKS_LOG_WARN(db_options_.info_log, "[Tiering] RED. Force Spill. Free: %" PRIu64, free_space);
+        } else if (free_space < kYellowThreshold) {
+          // [YELLOW State] 黄色拥塞控制：边拥塞边挪走
+          // 计算压力分 (0.0 ~ 1.0)
+          double pressure_score = 1.0 - (double)(free_space - kRedThreshold) /
+                                     (double)(kYellowThreshold - kRedThreshold);
+
+          // 计算年龄分 (只有超过 5分钟 才有分)
+          double age_score = 0.0;
+          if (data_age_sec > kColdAgeThreshold) {
+            age_score = std::min(1.0, (double)(data_age_sec - kColdAgeThreshold) / 300.0);
+          }
+          // 综合打分：在 Yellow 状态下，即使数据不老，只要压力大也要被迫挪走
+          double total_score = (pressure_score * 0.6) + (age_score * 0.4);
+          // 采样决策
           uint64_t sample = file_number % 100;
           if (sample < (total_score * 100)) {
             migrate = true;
             ROCKS_LOG_INFO(db_options_.info_log,
-                           "[Admission] SMOOTH. Score: %.2f (P:%.2f, A:%.2f). "
-                           "Sample: %" PRIu64,
-                           total_score, pressure_score, age_score, sample);
+                "[Tiering] YELLOW. Score: %.2f (P:%.2f, A:%.2f). Migrating.",
+                total_score, pressure_score, age_score);
           }
         }
 
