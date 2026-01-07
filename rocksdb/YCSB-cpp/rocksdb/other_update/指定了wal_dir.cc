@@ -6,18 +6,17 @@
 //  Modifications Copyright 2023 Chengye YU <yuchengye2013 AT outlook.com>.
 //
 
-#include "rocksdb_db.h"
-
-#include "core/core_workload.h"
-#include "core/db_factory.h"
-#include "utils/utils.h"
-
 #include <rocksdb/cache.h>
 #include <rocksdb/filter_policy.h>
 #include <rocksdb/merge_operator.h>
 #include <rocksdb/status.h>
 #include <rocksdb/utilities/options_util.h>
 #include <rocksdb/write_batch.h>
+
+#include "../rocksdb_db.h"
+#include "core/core_workload.h"
+#include "core/db_factory.h"
+#include "utils/utils.h"
 
 namespace {
   const std::string PROP_NAME = "rocksdb.dbname";
