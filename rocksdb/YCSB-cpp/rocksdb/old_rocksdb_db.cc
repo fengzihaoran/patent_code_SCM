@@ -373,24 +373,14 @@ void RocksdbDB::GetOptions(const utils::Properties &props, rocksdb::Options *opt
     }
 
     /* [Patent Logic] */
-    opt->write_buffer_size = 128 * 1024 * 1024; // 128MB
-    opt->level0_file_num_compaction_trigger = 4;
-    opt->max_bytes_for_level_base = 2ULL * 1024 * 1024 * 1024; // 2GB
-    opt->target_file_size_base = 64 * 1024 * 1024; // 64MB SST文件大小
+    opt->write_buffer_size = 128ULL * 1024 * 1024; // 128MB、memtable（内存写缓冲区）的大小，达到该阈值会触发刷盘（落盘到 SST 文件）；
+    opt->target_file_size_base = 256ULL * 1024 * 1024; // 256MB SST文件大小
+    opt->level0_file_num_compaction_trigger = 10; //当 Level 0 层的 SST 文件数量达到 12 个时，触发 Level 0 到 Level 1 的 Compaction（数据压缩 / 合并操作）。
+    opt->level0_slowdown_writes_trigger = 30; //当 Level 0 的 SST 文件数量达到 36 个时，触发写减速机制
+    opt->level0_stop_writes_trigger = 50; //当 Level 0 的 SST 文件数量达到 60 个时，触发写停止机制。
+    opt->max_bytes_for_level_base = 6ULL * 1024 * 1024 * 1024; // Level 1 层的总大小:6GB
+    opt->max_total_wal_size = 1ULL * 1024 * 1024 * 1024;  // cap WAL total size  1GB
 
-    // 2. 配置物理隔离路径 (Path Mapping)
-    // opt->db_paths.clear();
-    // [路径 0: Optane SSD] (物理路径)
-    // 设定上限为 3.5 GB
-    // 计算逻辑：2GB (L1) + 0.5GB (L0) + 1GB (Compaction 缓冲/安全余量) = 3.5GB
-    // 一旦总使用量超过 3.5GB，RocksDB 就会强制将新生成的 SST (即 L2) 写到下一个路径。
-    // 这完美适配你的 4GB 物理盘，留出了 500MB 防止文件系统写满崩溃。
-    // uint64_t optane_limit = 3584ULL * 1024 * 1024; // 3.5 GB
-    // opt->db_paths.emplace_back("/home/femu/mnt/optane", optane_limit);
-
-    // [路径 1: ZNS SSD] (ZenFS 虚拟路径)
-    // 承接所有溢出的冷数据 (L2, L3...)
-    // opt->db_paths.emplace_back("zenfs_data", 0); // 0 代表无限大
     /* [Patent Logic] */
   }
 }

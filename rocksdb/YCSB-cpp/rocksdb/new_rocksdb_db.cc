@@ -19,6 +19,10 @@
 #include <rocksdb/utilities/options_util.h>
 #include <rocksdb/write_batch.h>
 
+//patent code_Start
+#include <sys/statvfs.h>
+//patent code_End
+
 namespace {
   const std::string PROP_NAME = "rocksdb.dbname";
   const std::string PROP_NAME_DEFAULT = "";
@@ -106,6 +110,11 @@ namespace {
 
   const std::string PROP_SYNC = "rocksdb.sync";
   const std::string PROP_SYNC_DEFAULT = "false";
+
+  //patent code_Start
+  // const std::string PROP_SCMGB = "rocksdb.SCM_GB";
+  // const std::string PROP_SCMGB_DEFAULT = "4";
+  //patent code_End
 
   static std::shared_ptr<rocksdb::Env> env_guard;
   static std::shared_ptr<rocksdb::Cache> block_cache;
@@ -222,7 +231,7 @@ void RocksdbDB::Init() {
   }
 }
 
-void RocksdbDB::Cleanup() { 
+void RocksdbDB::Cleanup() {
   const std::lock_guard<std::mutex> lock(mu_);
   if (--ref_cnt_) {
     return;
@@ -373,10 +382,13 @@ void RocksdbDB::GetOptions(const utils::Properties &props, rocksdb::Options *opt
     }
 
     /* [Patent Logic] */
-    opt->write_buffer_size = 128 * 1024 * 1024; // 128MB
-    opt->level0_file_num_compaction_trigger = 4;
-    opt->max_bytes_for_level_base = 2ULL * 1024 * 1024 * 1024; // 2GB
-    opt->target_file_size_base = 64 * 1024 * 1024; // 64MB SST文件大小
+    opt->write_buffer_size = 128ULL * 1024 * 1024; // 128MB、memtable（内存写缓冲区）的大小，达到该阈值会触发刷盘（落盘到 SST 文件）；
+    opt->target_file_size_base = 256ULL * 1024 * 1024; // 256MB SST文件大小
+    opt->level0_file_num_compaction_trigger = 10; //当 Level 0 层的 SST 文件数量达到 12 个时，触发 Level 0 到 Level 1 的 Compaction（数据压缩 / 合并操作）。
+    opt->level0_slowdown_writes_trigger = 30; //当 Level 0 的 SST 文件数量达到 36 个时，触发写减速机制
+    opt->level0_stop_writes_trigger = 50; //当 Level 0 的 SST 文件数量达到 60 个时，触发写停止机制。
+    opt->max_bytes_for_level_base = 6ULL * 1024 * 1024 * 1024; // Level 1 层的总大小:6GB
+    opt->max_total_wal_size = 1ULL * 1024 * 1024 * 1024;  // cap WAL total size  1GB
 
     // 2. 配置物理隔离路径 (Path Mapping)
     opt->db_paths.clear();
@@ -385,12 +397,39 @@ void RocksdbDB::GetOptions(const utils::Properties &props, rocksdb::Options *opt
     // 计算逻辑：2GB (L1) + 0.5GB (L0) + 1GB (Compaction 缓冲/安全余量) = 3.5GB
     // 一旦总使用量超过 3.5GB，RocksDB 就会强制将新生成的 SST (即 L2) 写到下一个路径。
     // 这完美适配你的 4GB 物理盘，留出了 500MB 防止文件系统写满崩溃。
-    uint64_t optane_limit = 3584ULL * 1024 * 1024; // 3.5 GB
-    opt->db_paths.emplace_back("/home/femu/mnt/optane", optane_limit);
+
+    // [Dynamic Config] 获取 Optane 目标大小
+    uint64_t optane_capacity = 0;
+
+    /// 1. 如果设置了环境变量，优先使用（软件模拟大小）
+    // if (props.GetProperty(PROP_SCMGB, PROP_SCMGB_DEFAULT) == "true") {
+    //   optane_capacity = 4ULL * 1024 * 1024 * 1024;
+    //   // fprintf(stderr, "====== [DEBUG] optane_capacity: [%lu] ======\n", optane_capacity);
+    // }
+    // 1. 如果设置了环境变量，优先使用（软件模拟大小）
+    const char* env_scm_gb = std::getenv("SCM_GB");
+    if (env_scm_gb) {
+      // 1. 如果设置了环境变量，优先使用（软件模拟大小）
+      optane_capacity = std::stoull(env_scm_gb) * 1024 * 1024 * 1024;
+    }
+    else {
+      // 2. 否则，自动探测挂载点的物理大小
+      struct statvfs stat;
+      if (statvfs("/home/femu/mnt/optane", &stat) == 0) {
+        optane_capacity = stat.f_blocks * stat.f_frsize;
+        // fprintf(stderr, "====== [DEBUG] optane_capacity: [%lu] ======\n", optane_capacity);
+      } else {
+        optane_capacity = 16ULL * 1024 * 1024 * 1024; // Fallback 4GB
+      }
+    }
+
+
+    // uint64_t optane_limit = 4ULL * 1024 * 1024 * 1024; // 4 GB
+    opt->db_paths.emplace_back("/home/femu/mnt/optane", optane_capacity);
 
     // [路径 1: ZNS SSD] (ZenFS 虚拟路径)
     // 承接所有溢出的冷数据 (L2, L3...)
-    opt->db_paths.emplace_back("zenfs_data", 0); // 0 代表无限大
+    opt->db_paths.emplace_back("/zenfs_data", 0); // 0 代表无限大
     // opt->wal_dir     = "/home/femu/mnt/optane/wal"; // WAL → Optane
     // opt->db_log_dir  = "/home/femu/mnt/optane/log"; // LOG → Optane
     /* [Patent Logic] */
