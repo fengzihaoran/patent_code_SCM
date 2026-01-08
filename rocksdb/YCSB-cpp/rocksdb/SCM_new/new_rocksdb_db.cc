@@ -6,18 +6,17 @@
 //  Modifications Copyright 2023 Chengye YU <yuchengye2013 AT outlook.com>.
 //
 
-#include "rocksdb_db.h"
-
-#include "core/core_workload.h"
-#include "core/db_factory.h"
-#include "utils/utils.h"
-
 #include <rocksdb/cache.h>
 #include <rocksdb/filter_policy.h>
 #include <rocksdb/merge_operator.h>
 #include <rocksdb/status.h>
 #include <rocksdb/utilities/options_util.h>
 #include <rocksdb/write_batch.h>
+
+#include "../rocksdb_db.h"
+#include "core/core_workload.h"
+#include "core/db_factory.h"
+#include "utils/utils.h"
 
 //patent code_Start
 #include <sys/statvfs.h>
@@ -231,7 +230,7 @@ void RocksdbDB::Init() {
   }
 }
 
-void RocksdbDB::Cleanup() { 
+void RocksdbDB::Cleanup() {
   const std::lock_guard<std::mutex> lock(mu_);
   if (--ref_cnt_) {
     return;
@@ -454,11 +453,11 @@ void RocksdbDB::DeserializeRowFilter(std::vector<Field> &values, const char *p, 
     assert(p < lim);
     uint32_t len = *reinterpret_cast<const uint32_t *>(p);
     p += sizeof(uint32_t);
-    std::string field(p, static_cast<const size_t>(len));
+    std::string field(p, static_cast<size_t>(len));
     p += len;
     len = *reinterpret_cast<const uint32_t *>(p);
     p += sizeof(uint32_t);
-    std::string value(p, static_cast<const size_t>(len));
+    std::string value(p, static_cast<size_t>(len));
     p += len;
     if (*filter_iter == field) {
       values.push_back({field, value});
@@ -480,11 +479,11 @@ void RocksdbDB::DeserializeRow(std::vector<Field> &values, const char *p, const 
     assert(p < lim);
     uint32_t len = *reinterpret_cast<const uint32_t *>(p);
     p += sizeof(uint32_t);
-    std::string field(p, static_cast<const size_t>(len));
+    std::string field(p, static_cast<size_t>(len));
     p += len;
     len = *reinterpret_cast<const uint32_t *>(p);
     p += sizeof(uint32_t);
-    std::string value(p, static_cast<const size_t>(len));
+    std::string value(p, static_cast<size_t>(len));
     p += len;
     values.push_back({field, value});
   }

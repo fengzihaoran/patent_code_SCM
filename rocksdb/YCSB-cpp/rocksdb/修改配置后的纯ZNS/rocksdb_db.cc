@@ -6,18 +6,17 @@
 //  Modifications Copyright 2023 Chengye YU <yuchengye2013 AT outlook.com>.
 //
 
-#include "rocksdb_db.h"
-
-#include "core/core_workload.h"
-#include "core/db_factory.h"
-#include "utils/utils.h"
-
 #include <rocksdb/cache.h>
 #include <rocksdb/filter_policy.h>
 #include <rocksdb/merge_operator.h>
 #include <rocksdb/status.h>
 #include <rocksdb/utilities/options_util.h>
 #include <rocksdb/write_batch.h>
+
+#include "../rocksdb_db.h"
+#include "core/core_workload.h"
+#include "core/db_factory.h"
+#include "utils/utils.h"
 
 namespace {
   const std::string PROP_NAME = "rocksdb.dbname";
@@ -378,7 +377,7 @@ void RocksdbDB::GetOptions(const utils::Properties &props, rocksdb::Options *opt
     opt->level0_file_num_compaction_trigger = 10; //当 Level 0 层的 SST 文件数量达到 12 个时，触发 Level 0 到 Level 1 的 Compaction（数据压缩 / 合并操作）。
     opt->level0_slowdown_writes_trigger = 30; //当 Level 0 的 SST 文件数量达到 36 个时，触发写减速机制
     opt->level0_stop_writes_trigger = 50; //当 Level 0 的 SST 文件数量达到 60 个时，触发写停止机制。
-    opt->max_bytes_for_level_base = 6ULL * 1024 * 1024 * 1024; // Level 1 层的总大小:6GB
+    opt->c = 6ULL * 1024 * 1024 * 1024; // Level 1 层的总大小:6GB
     opt->max_total_wal_size = 1ULL * 1024 * 1024 * 1024;  // cap WAL total size  1GB
 
     /* [Patent Logic] */
