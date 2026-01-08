@@ -386,12 +386,12 @@ class ZenFS : public FileSystemWrapper {
     Debug(logger_, "CreatDirIfMissing: %s to aux: %s\n", d.c_str(),
           ToAuxPath(d).c_str());
     // --- [Patent Logic Start] ---
-    // 必须先判断！
-    if (IsOptanePath(d)) {
+    std::string dname = FormatPathLexically(d);
+    if (IsOptanePath(dname)) {
       // 这里的 fprintf 也很重要，看看是不是真的进了这个分支
       // fprintf(stderr, "====== [DEBUG] CreatDirIfMissing: %s ======\n", d.c_str());
       // ！！！关键点：这里绝对不能用 ToAuxPath，必须直接传 dname ！！！
-      return target()->CreateDirIfMissing(d, options, dbg);
+      return target()->CreateDirIfMissing(dname, options, dbg);
     }
     // --- [Patent Logic End] ---
 

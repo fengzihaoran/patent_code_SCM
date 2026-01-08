@@ -14,40 +14,25 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <iostream>
 #include <set>
 #include <sstream>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "fs_zenfs.h"
+#include "../fs_zenfs.h"
 
 #ifdef ZENFS_EXPORT_PROMETHEUS
 #include "metrics_prometheus.h"
 #endif
+#include "../snapshot.h"
 #include "rocksdb/utilities/object_registry.h"
-#include "snapshot.h"
 #include "util/coding.h"
 #include "util/crc32c.h"
 
 #define DEFAULT_ZENV_LOG_PATH "/tmp/"
 
 namespace ROCKSDB_NAMESPACE {
-
-// --- [Patent Logic Start] ---
-// 判断路径是否属于 Optane SSD (物理 Ext4/XFS 路径)
-bool ZenFS:: IsOptanePath(const std::string& path) {
-  // fprintf(stderr, "====== [DEBUG] Checking Path: [%s] ======\n", path.c_str());
-  // 必须与你在 rocksdb_db.cc 中配置的路径严格一致
-  // static const std::string kOptanePrefix = "/home/femu/mnt/optane";
-  Debug(logger_, "FileExists: %s \n", path.c_str());
-  if (path.find("optane") != std::string::npos) {
-    return true;
-  }
-  return false;
-}
-// --- [Patent Logic End] ---
 
 Status Superblock::DecodeFrom(Slice* input) {
   if (input->size() != ENCODED_SIZE) {
@@ -684,22 +669,13 @@ IOStatus ZenFS::NewSequentialFile(const std::string& filename,
                                   std::unique_ptr<FSSequentialFile>* result,
                                   IODebugContext* dbg) {
   std::string fname = FormatPathLexically(filename);
-
-  // --- [Patent Logic: Read Routing] ---
-  if (IsOptanePath(fname)) {
-    // return target()->NewSequentialFile(ToAuxPath(fname), file_opts, result, dbg);
-    return target()->NewSequentialFile(fname, file_opts, result, dbg);
-
-  }
-  // ------------------------------------
-
   std::shared_ptr<ZoneFile> zoneFile = GetFile(fname);
 
   Debug(logger_, "New sequential file: %s direct: %d\n", fname.c_str(),
         file_opts.use_direct_reads);
 
   if (zoneFile == nullptr) {
-    return target()->NewSequentialFile(fname, file_opts, result,
+    return target()->NewSequentialFile(ToAuxPath(fname), file_opts, result,
                                        dbg);
   }
 
@@ -712,13 +688,6 @@ IOStatus ZenFS::NewRandomAccessFile(const std::string& filename,
                                     std::unique_ptr<FSRandomAccessFile>* result,
                                     IODebugContext* dbg) {
   std::string fname = FormatPathLexically(filename);
-
-  // --- [Patent Logic: Read Routing] ---
-  if (IsOptanePath(fname)) {
-    return target()->NewRandomAccessFile(fname, file_opts, result, dbg);
-  }
-  // ------------------------------------
-
   std::shared_ptr<ZoneFile> zoneFile = GetFile(fname);
 
   Debug(logger_, "New random access file: %s direct: %d\n", fname.c_str(),
@@ -779,13 +748,6 @@ IOStatus ZenFS::ReuseWritableFile(const std::string& filename,
 IOStatus ZenFS::FileExists(const std::string& filename,
                            const IOOptions& options, IODebugContext* dbg) {
   std::string fname = FormatPathLexically(filename);
-
-  // --- [Patent Logic] ---
-  if (IsOptanePath(fname)) {
-    return target()->FileExists(fname, options, dbg);
-  }
-  // ----------------------
-
   Debug(logger_, "FileExists: %s \n", fname.c_str());
 
   if (GetFile(fname) == nullptr) {
@@ -857,16 +819,6 @@ IOStatus ZenFS::GetChildrenNoLock(const std::string& dir_path,
 
   Debug(logger_, "GetChildrenNoLock: %s \n", dir.c_str());
 
-  // --- [Patent Logic Start] ---
-  // fprintf(stderr, "====== [DEBUG] GetChildrenNoLock for: %s ======\n", dir.c_str());
-  // 必须先判断！
-  if (IsOptanePath(dir)) {
-    // 这里的 fprintf 也很重要，看看是不是真的进了这个分支
-    // ！！！关键点：这里绝对不能用 ToAuxPath，必须直接传 dname ！！！
-    return target()->GetChildren(dir, options, result, dbg);
-  }
-  // --- [Patent Logic End] ---
-
   s = target()->GetChildren(ToAuxPath(dir), options, &auxfiles, dbg);
   if (!s.ok()) {
     /* On ZenFS empty directories cannot be created, therefore we cannot
@@ -890,15 +842,6 @@ IOStatus ZenFS::GetChildrenNoLock(const std::string& dir_path,
 IOStatus ZenFS::GetChildren(const std::string& dir, const IOOptions& options,
                             std::vector<std::string>* result,
                             IODebugContext* dbg) {
-
-  // --- [Patent Logic Start] ---
-  std::string dname = FormatPathLexically(dir);
-  if (IsOptanePath(dname)) {
-    // 直接列出 Optane 物理目录下的文件
-    return target()->GetChildren(dname, options, result, dbg);
-  }
-  // --- [Patent Logic End] ---
-
   std::lock_guard<std::mutex> lock(files_mtx_);
   return GetChildrenNoLock(dir, options, result, dbg);
 }
@@ -959,18 +902,6 @@ IOStatus ZenFS::OpenWritableFile(const std::string& filename,
                                  IODebugContext* dbg, bool reopen) {
   IOStatus s;
   std::string fname = FormatPathLexically(filename);
-
-  // --- [Patent Logic: Write Routing] ---
-  if (IsOptanePath(fname)) {
-    // 路由到 Optane (底层 POSIX 文件系统)
-    if (reopen) {
-      return target()->ReopenWritableFile(fname, file_opts, result, dbg);
-    } else {
-      return target()->NewWritableFile(fname, file_opts, result, dbg);
-    }
-  }
-  // -------------------------------------
-
   bool resetIOZones = false;
   {
     std::lock_guard<std::mutex> file_lock(files_mtx_);
@@ -1023,13 +954,6 @@ IOStatus ZenFS::OpenWritableFile(const std::string& filename,
 
 IOStatus ZenFS::DeleteFile(const std::string& fname, const IOOptions& options,
                            IODebugContext* dbg) {
-
-  // --- [Patent Logic] ---
-  if (IsOptanePath(fname)) {
-    return target()->DeleteFile(fname, options, dbg);
-  }
-  // ----------------------
-
   IOStatus s;
 
   Debug(logger_, "DeleteFile: %s \n", fname.c_str());
@@ -1066,13 +990,6 @@ IOStatus ZenFS::GetFileSize(const std::string& filename,
                             IODebugContext* dbg) {
   std::shared_ptr<ZoneFile> zoneFile(nullptr);
   std::string f = FormatPathLexically(filename);
-
-  // --- [Patent Logic] ---
-  if (IsOptanePath(f)) {
-    return target()->GetFileSize(f, options, size, dbg);
-  }
-  // ----------------------
-
   IOStatus s;
 
   Debug(logger_, "GetFileSize: %s \n", f.c_str());
@@ -1497,32 +1414,6 @@ Status ZenFS::RecoverFrom(ZenMetaLog* log) {
     return Status::OK();
   else
     return Status::NotFound("ZenFS", "No snapshot found");
-}
-std::string ZenFS::ToAuxPath(std::string path) {
-  // --- [Patent Logic Start] ---
-  if (path.find("optane") != std::string::npos) {
-    // 可以在这里加个打印，但这会刷屏，建议调试通了就注释掉
-    // fprintf(stderr, "[ZenFS Router] Passthrough: %s\n", path.c_str());
-    return path;
-  }
-
-    // 1. 获取辅助路径并清理末尾的'/'
-    std::string auxPath = superblock_->GetAuxFsPath();
-    if (!auxPath.empty() && auxPath.back() == '/') {
-        auxPath.pop_back(); // 移除末尾的'/'
-    }
-
-    // 2. 清理path开头的'/'
-    if (!path.empty() && path.front() == '/') {
-        path.erase(0, 1); // 移除开头的'/'
-    }
-
-    // 3. 拼接（中间加单个'/'）
-    std::string resPath = auxPath + "/" + path; // 此时不会出现//
-    return resPath;
-
-
-  // --- [Patent Logic End] ---
 }
 
 /* Mount the filesystem by recovering form the latest valid metadata zone */
