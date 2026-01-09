@@ -1036,9 +1036,10 @@ Status FlushJob::WriteLevel0Table() {
                 (current_time > oldest_time) ? (current_time - oldest_time) : 0;
 
             // 如果 Flush 的数据在内存里积压超过 240s，视为"温冷数据"，优先去ZNS
-            const uint64_t kColdFlushAgeThreshold = 240;// 240s（只有真的 backlog 才触发）
-            const double kFlushAgeRampSec = 240.0;
-            bool is_cold_flush = (flush_age > kColdFlushAgeThreshold);
+            // ---- Adaptive age threshold (Compaction: more conservative) ----
+            const double kMaxAgeLimit = 240.0; // 压力小：允许驻留更久（4min）
+            const double kMinAgeLimit = 60.0;  // 压力大：更快判冷（1min）
+            const double kAgeRampSec  = 120.0; // 年龄分爬坡（2min 拉满）
 
             // --- 决策状态机 ---
             if (free_space < kRedThreshold) {
@@ -1051,28 +1052,32 @@ Status FlushJob::WriteLevel0Table() {
             } else if (free_space < kYellowThreshold) {
               // [YELLOW] 平滑迁移：空间越少，去 ZNS 概率越高
               // Pressure 0.0 (剩2.5GB) -> 1.0 (剩0.5GB)
-              double pressure =
+              double pressure_score =
                   1.0 - (double)(free_space - kRedThreshold) /
                             (double)(kYellowThreshold - kRedThreshold);
-              pressure = clamp01(pressure);
+              pressure_score = clamp01(pressure_score);
+
+              double dyn_th = kMaxAgeLimit - pressure_score * (kMaxAgeLimit - kMinAgeLimit);
+              if (dyn_th < kMinAgeLimit) dyn_th = kMinAgeLimit;
+              if (dyn_th > kMaxAgeLimit) dyn_th = kMaxAgeLimit;
 
               // age_score：冷只做“加成”，不要一票否决
               double age_score = 0.0;
-              if (is_cold_flush) {
-                age_score = std::min(1.0, (double)(flush_age - kColdFlushAgeThreshold) / kFlushAgeRampSec);
+              if ((double)flush_age > dyn_th) {
+                age_score = std::min(1.0, (double)(flush_age - dyn_th) / kAgeRampSec);
               }
 
               // 总分：压力主导（80%），冷度加成（20%）,flush主导压力,compaction可以更看“数据年龄”
-              double total_score = pressure * 0.8 + age_score * 0.2;
+              double total_score = pressure_score * 0.8 + age_score * 0.2;
+              total_score = clamp01(total_score);
 
               // 确定性采样 (Mod 100)
               uint64_t sample = meta_.fd.GetNumber() % 100;
-
               if (sample < (uint64_t)(total_score * 100)) {
                 migrate_to_cold = true;
                 ROCKS_LOG_INFO(db_options_.info_log,
-                               "[Flush] YELLOW. P=%.2f A=%.2f Age=%" PRIu64 "s -> spill",
-                               pressure, age_score, flush_age);
+                "[Flush] YELLOW. P=%.2f A=%.2f Age=%" PRIu64 "s DynTh=%.0fs Score=%.2f -> spill",
+                pressure_score, age_score, flush_age, dyn_th, total_score);
               }
               // 触发条件：
               // 1. 命中概率 (sample < pressure * 100)

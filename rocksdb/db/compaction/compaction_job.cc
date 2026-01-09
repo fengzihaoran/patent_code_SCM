@@ -1901,9 +1901,6 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
       if (s_space.ok()) {
         // [Tuned Param] 1GB: 适配 1GB WAL 限制
         const uint64_t kRedThreshold = 1024ULL * 1024 * 1024;
-        const uint64_t kColdAgeThreshold = 300;
-        const double kFlushAgeRampSec = 300.0;
-
         bool migrate = false;
         // [Tuned Param] 1.5GB: 适配 2GB L1 Base
         // [Yellow]: 动态设定为总容量的 40%
@@ -1954,25 +1951,35 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
           migrate = true;
           ROCKS_LOG_WARN(db_options_.info_log, "[Tiering] RED. Force Spill. Free: %" PRIu64, free_space);
         } else if (free_space < kYellowThreshold) {
+          // ---- Adaptive age threshold (Compaction: more conservative) ----
+          const double kMaxAgeLimit = 360.0; // 压力小：允许驻留更久（6min）
+          const double kMinAgeLimit = 90.0;  // 压力大：更快判冷（1.5min）
+          const double kAgeRampSec  = 180.0; // 年龄分爬坡（3min 拉满）
           // [YELLOW State] 黄色拥塞控制：边拥塞边挪走
           // 计算压力分 (0.0 ~ 1.0)
           double pressure_score = 1.0 - (double)(free_space - kRedThreshold) /
                                      (double)(kYellowThreshold - kRedThreshold);
           pressure_score = clamp01(pressure_score);
+
+          double dyn_th = kMaxAgeLimit - pressure_score * (kMaxAgeLimit - kMinAgeLimit);
+          if (dyn_th < kMinAgeLimit) dyn_th = kMinAgeLimit;
+          if (dyn_th > kMaxAgeLimit) dyn_th = kMaxAgeLimit;
+
           // 计算年龄分 (只有超过 4分钟 才有分)
           double age_score = 0.0;
-          if (data_age_sec > kColdAgeThreshold) {
-            age_score = std::min(1.0, (double)(data_age_sec - kColdAgeThreshold) / kFlushAgeRampSec);
+          if ((double)data_age_sec > dyn_th) {
+            age_score = std::min(1.0, (double)(data_age_sec - dyn_th) / kAgeRampSec);
           }
           // 综合打分：在 Yellow 状态下，即使数据不老，只要压力大也要被迫挪走
           double total_score = (pressure_score * 0.6) + (age_score * 0.4);
+          total_score = clamp01(total_score);
           // 采样决策
           uint64_t sample = file_number % 100;
           if (sample < (total_score * 100)) {
             migrate = true;
             ROCKS_LOG_INFO(db_options_.info_log,
-                "[Tiering] YELLOW. Score: %.2f (P:%.2f, A:%.2f). Migrating.",
-                total_score, pressure_score, age_score);
+            "[Tiering] YELLOW(compaction). P=%.2f A=%.2f DynTh=%.0fs Age=%" PRIu64 "s -> Migrating",
+            pressure_score, age_score, dyn_th, data_age_sec);
           }
         }
 
