@@ -248,7 +248,7 @@ void RocksdbDB::GetOptions(const utils::Properties &props, rocksdb::Options *opt
       throw utils::Exception(std::string("RocksDB CreateFromUri: ") + s.ToString());
     }
     //加入这行代码
-    printf("env is nullptr ? %s %p filesystem: %p\n",env ? "no" : "yes",env,env->GetFileSystem().get());
+    // printf("env is nullptr ? %s %p filesystem: %p\n",env ? "no" : "yes",env,env->GetFileSystem().get());
     //
     opt->env = env;
   }
@@ -395,11 +395,11 @@ void RocksdbDB::DeserializeRowFilter(std::vector<Field> &values, const char *p, 
     assert(p < lim);
     uint32_t len = *reinterpret_cast<const uint32_t *>(p);
     p += sizeof(uint32_t);
-    std::string field(p, static_cast<const size_t>(len));
+    std::string field(p, static_cast<size_t>(len));
     p += len;
     len = *reinterpret_cast<const uint32_t *>(p);
     p += sizeof(uint32_t);
-    std::string value(p, static_cast<const size_t>(len));
+    std::string value(p, static_cast<size_t>(len));
     p += len;
     if (*filter_iter == field) {
       values.push_back({field, value});
@@ -421,11 +421,11 @@ void RocksdbDB::DeserializeRow(std::vector<Field> &values, const char *p, const 
     assert(p < lim);
     uint32_t len = *reinterpret_cast<const uint32_t *>(p);
     p += sizeof(uint32_t);
-    std::string field(p, static_cast<const size_t>(len));
+    std::string field(p, static_cast<size_t>(len));
     p += len;
     len = *reinterpret_cast<const uint32_t *>(p);
     p += sizeof(uint32_t);
-    std::string value(p, static_cast<const size_t>(len));
+    std::string value(p, static_cast<size_t>(len));
     p += len;
     values.push_back({field, value});
   }
