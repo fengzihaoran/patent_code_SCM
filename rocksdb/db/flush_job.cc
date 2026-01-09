@@ -978,7 +978,7 @@ Status FlushJob::WriteLevel0Table() {
 
 
       // =================================================================================
-      // [Patent Logic] SCM-Aware Smooth Flush (Optimized for 256MB WAL & 4GB Optane)
+      // [Patent Logic] SCM-Aware Smooth Flush (Optimized for 1GB WAL & 16GB Optane)
       // =================================================================================
       const auto& cf_paths = cfd_->ioptions()->cf_paths;
       // 仅当多路径且默认目标为 Optane (Path 0) 时执行
@@ -1011,8 +1011,8 @@ Status FlushJob::WriteLevel0Table() {
                 }
               }
 
-              // 计算黄线 (38%)
-              uint64_t yellow = static_cast<uint64_t>(capacity * 0.38);
+              // 计算黄线 (25%)
+              uint64_t yellow = static_cast<uint64_t>(capacity * 0.25);
 
               // 确保黄线在红线之上
               if (yellow <= kRedThreshold) {
@@ -1021,6 +1021,13 @@ Status FlushJob::WriteLevel0Table() {
 
               return yellow;
             }();
+
+            auto clamp01 = [](double x) {
+              if (x < 0.0) return 0.0;
+              if (x > 1.0) return 1.0;
+              return x;
+            };
+
             bool migrate_to_cold = false;
 
             // 1. 获取最老数据时间 (用于判断这个 Memtable 是否在内存里赖了很久)
@@ -1028,9 +1035,10 @@ Status FlushJob::WriteLevel0Table() {
             uint64_t flush_age =
                 (current_time > oldest_time) ? (current_time - oldest_time) : 0;
 
-            // 如果 Flush 的数据在内存里积压超过 180s，视为"温冷数据"，优先去
-            // ZNS
-            bool is_cold_flush = (flush_age > 180);
+            // 如果 Flush 的数据在内存里积压超过 240s，视为"温冷数据"，优先去ZNS
+            const uint64_t kColdFlushAgeThreshold = 240;// 240s（只有真的 backlog 才触发）
+            const double kFlushAgeRampSec = 240.0;
+            bool is_cold_flush = (flush_age > kColdFlushAgeThreshold);
 
             // --- 决策状态机 ---
             if (free_space < kRedThreshold) {
@@ -1046,26 +1054,40 @@ Status FlushJob::WriteLevel0Table() {
               double pressure =
                   1.0 - (double)(free_space - kRedThreshold) /
                             (double)(kYellowThreshold - kRedThreshold);
-              if (pressure < 0) pressure = 0;
+              pressure = clamp01(pressure);
+
+              // age_score：冷只做“加成”，不要一票否决
+              double age_score = 0.0;
+              if (is_cold_flush) {
+                age_score = std::min(1.0, (double)(flush_age - kColdFlushAgeThreshold) / kFlushAgeRampSec);
+              }
+
+              // 总分：压力主导（80%），冷度加成（20%）,flush主导压力,compaction可以更看“数据年龄”
+              double total_score = pressure * 0.8 + age_score * 0.2;
 
               // 确定性采样 (Mod 100)
               uint64_t sample = meta_.fd.GetNumber() % 100;
 
+              if (sample < (uint64_t)(total_score * 100)) {
+                migrate_to_cold = true;
+                ROCKS_LOG_INFO(db_options_.info_log,
+                               "[Flush] YELLOW. P=%.2f A=%.2f Age=%" PRIu64 "s -> spill",
+                               pressure, age_score, flush_age);
+              }
               // 触发条件：
               // 1. 命中概率 (sample < pressure * 100)
               // 2. 或者数据本身偏冷 (is_cold_flush) 且有一定压力 (pressure >
               // 0.1)
-              if (sample < (pressure * 100) ||
-                  (is_cold_flush && pressure > 0.1)) {
-                migrate_to_cold = true;
-                ROCKS_LOG_INFO(
-                    db_options_.info_log,
-                    "[Flush] State: YELLOW. Pressure: %.2f, Age: %" PRIu64
-                    "s. To ZNS.",
-                    pressure, flush_age);
-              }
+              // if (sample < (pressure * 100) ||
+              //     (is_cold_flush && pressure > 0.1)) {
+              //   migrate_to_cold = true;
+              //   ROCKS_LOG_INFO(
+              //       db_options_.info_log,
+              //       "[Flush] State: YELLOW. Pressure: %.2f, Age: %" PRIu64
+              //       "s. To ZNS.",
+              //       pressure, flush_age);
+              // }
             }
-            // [GREEN] 空间充足 (>2.5GB)，默认留给 Optane
 
             if (migrate_to_cold) {
               uint32_t path_cold = static_cast<uint32_t>(cf_paths.size() - 1);
