@@ -20,12 +20,12 @@
 #include <utility>
 #include <vector>
 
-#include "../fs_zenfs.h"
+#include "fs_zenfs.h"
 
 #ifdef ZENFS_EXPORT_PROMETHEUS
 #include "metrics_prometheus.h"
 #endif
-#include "../snapshot.h"
+#include "snapshot.h"
 #include "rocksdb/utilities/object_registry.h"
 #include "util/coding.h"
 #include "util/crc32c.h"

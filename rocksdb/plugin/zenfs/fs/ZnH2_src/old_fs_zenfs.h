@@ -17,11 +17,11 @@ namespace fs = std::filesystem;
 #include <memory>
 #include <thread>
 
-#include "../io_zenfs.h"
-#include "../metrics.h"
-#include "../snapshot.h"
-#include "../version.h"
-#include "../zbd_zenfs.h"
+#include "io_zenfs.h"
+#include "metrics.h"
+#include "snapshot.h"
+#include "version.h"
+#include "zbd_zenfs.h"
 #include "rocksdb/env.h"
 #include "rocksdb/file_system.h"
 #include "rocksdb/status.h"
