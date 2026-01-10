@@ -1902,9 +1902,8 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
             : 0;
 
     if (s_space.ok()) {
-      // [Tuned Param] 1GB: 适配 1GB WAL 限制
-      const uint64_t kRedThreshold =
-          1024ULL * 1024 * 1024 + 512ULL * 1024 * 1024;
+      // [Tuned Param] 1.3GB: 适配 1GB WAL 限制
+      const uint64_t kRedThreshold = 1024ULL * 1024 * 1024 + 307ULL * 1024 * 1024;
       bool migrate = false;
       // [Tuned Param] 1.5GB: 适配 2GB L1 Base
       // [Yellow]: 动态设定为总容量的 40%
@@ -1932,8 +1931,8 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
           }
         }
 
-        // 计算黄线 (25%)
-        uint64_t yellow = static_cast<uint64_t>(capacity * 0.25);
+        // 计算黄线 (20%)
+        uint64_t yellow = static_cast<uint64_t>(capacity * 0.20);
 
         // 确保黄线在红线之上
         if (yellow <= kRedThreshold) {
@@ -1959,9 +1958,9 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
                        free_space);
       } else if (free_space < kYellowThreshold) {
         // ---- Adaptive age threshold (Compaction: more conservative) ----
-        const double kMaxAgeLimit = 420.0;  // 压力小：允许驻留更久（7min）
-        const double kMinAgeLimit = 150.0;   // 压力大：更快判冷（2.5min）
-        const double kAgeRampSec = 240.0;   // 年龄分爬坡（4min 拉满）
+        const double kMaxAgeLimit = 360.0; // 压力小：允许驻留更久（6min）
+        const double kMinAgeLimit = 120.0;  // 压力大：更快判冷（1.5min）
+        const double kAgeRampSec  = 210.0; // 年龄分爬坡（3min 拉满）
         // [YELLOW State] 黄色拥塞控制：边拥塞边挪走
         // 计算压力分 (0.0 ~ 1.0)
         double pressure_score =

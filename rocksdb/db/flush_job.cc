@@ -992,7 +992,7 @@ Status FlushJob::WriteLevel0Table() {
             // [Dynamic Thresholds] 动态计算阈值
             // -----------------------------------------------------------------
             // 足够安全 降低 Red 线：WAL 限制为 1GB
-            const uint64_t kRedThreshold = 1024ULL * 1024 * 1024 + 512ULL * 1024 * 1024;
+            const uint64_t kRedThreshold = 1024ULL * 1024 * 1024 + 307ULL * 1024 * 1024;
             static const uint64_t kYellowThreshold = [cf_paths]() {
               uint64_t capacity = 0;
               const char* env_scm_gb = std::getenv("SCM_GB");
@@ -1011,8 +1011,8 @@ Status FlushJob::WriteLevel0Table() {
                 }
               }
 
-              // 计算黄线 (25%)
-              uint64_t yellow = static_cast<uint64_t>(capacity * 0.25);
+              // 计算黄线 (20%)
+              uint64_t yellow = static_cast<uint64_t>(capacity * 0.20);
 
               // 确保黄线在红线之上
               if (yellow <= kRedThreshold) {
@@ -1037,9 +1037,9 @@ Status FlushJob::WriteLevel0Table() {
 
             // 如果 Flush 的数据在内存里积压超过 240s，视为"温冷数据"，优先去ZNS
             // ---- Adaptive age threshold (Compaction: more conservative) ----
-            const double kMaxAgeLimit = 300.0; // 压力小：允许驻留更久（5min）
-            const double kMinAgeLimit = 90.0;  // 压力大：更快判冷（1.5min）
-            const double kAgeRampSec  = 180.0; // 年龄分爬坡（3min 拉满）
+            const double kMaxAgeLimit = 260.0; // 压力小：允许驻留更久（4min）
+            const double kMinAgeLimit = 80.0;  // 压力大：更快判冷（1min）
+            const double kAgeRampSec  = 150.0; // 年龄分爬坡（2min 拉满）
 
             // --- 决策状态机 ---
             if (free_space < kRedThreshold) {
