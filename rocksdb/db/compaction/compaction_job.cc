@@ -1859,7 +1859,7 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
 
   // =================================================================================
   // [Patent Logic] Dual-Modal Offloading (Space + Hotness)
-  // Adjusted for: L1=2GB, Optane=4GB, SST=64MB
+  // Adjusted for: L1=6GB, Optane=16GB, SST=128MB
   // =================================================================================
   const auto& cf_paths = compact_->compaction->immutable_options()->cf_paths;
   uint32_t target_path_id = 0;

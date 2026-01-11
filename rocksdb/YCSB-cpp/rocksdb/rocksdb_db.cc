@@ -448,7 +448,7 @@ void RocksdbDB::GetOptions(
         optane_capacity = stat.f_blocks * stat.f_frsize;
         // fprintf(stderr, "====== [DEBUG] optane_capacity: [%lu] ======\n",optane_capacity);
       } else {
-        optane_capacity = 16ULL * 1024 * 1024 * 1024;  // Fallback 4GB
+        optane_capacity = 16ULL * 1024 * 1024 * 1024;  // Fallback 16GB
       }
     }
 
