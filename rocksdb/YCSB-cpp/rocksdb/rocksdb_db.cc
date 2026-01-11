@@ -426,12 +426,6 @@ void RocksdbDB::GetOptions(
 
     // 2. 配置物理隔离路径 (Path Mapping)
     opt->db_paths.clear();
-    // [路径 0: Optane SSD] (物理路径)
-    // 设定上限为 3.5 GB
-    // 计算逻辑：2GB (L1) + 0.5GB (L0) + 1GB (Compaction 缓冲/安全余量) = 3.5GB
-    // 一旦总使用量超过 3.5GB，RocksDB 就会强制将新生成的 SST (即 L2)
-    // 写到下一个路径。 这完美适配 4GB 物理盘，留出了 500MB
-    // 防止文件系统写满崩溃。
 
     // [Dynamic Config] 获取 Optane 目标大小
     uint64_t optane_capacity = 0;
@@ -452,34 +446,33 @@ void RocksdbDB::GetOptions(
       struct statvfs stat;
       if (statvfs("/home/femu/mnt/optane", &stat) == 0) {
         optane_capacity = stat.f_blocks * stat.f_frsize;
-        // fprintf(stderr, "====== [DEBUG] optane_capacity: [%lu] ======\n",
-        // optane_capacity);
+        // fprintf(stderr, "====== [DEBUG] optane_capacity: [%lu] ======\n",optane_capacity);
       } else {
         optane_capacity = 16ULL * 1024 * 1024 * 1024;  // Fallback 4GB
       }
     }
 
-    // -------------------- Hard budget: reserve space on Optane
-    // -------------------- 目的：让 SST 最多只能用 optane_target，永远留出 WAL
-    // + memtable 峰值 + 元数据安全余量
-    uint64_t wal_budget = opt->max_total_wal_size;  // 这里是 1GB
-    uint64_t memtable_sz = opt->write_buffer_size;  // 这里是 128MB
-    // Optane 总容量 optane_capacity 你已经算出来了
-    const uint64_t kSafety = 512ULL * 1024 * 1024;  // 512MB 保险
-    // RocksDB 峰值可能会同时持有多个 memtable（mutable + immutable + 等 flush
-    // 的） 用 max_write_buffer_number 做保守估计（默认一般是 2）
-    uint64_t active_memtables =
-        std::max<uint64_t>(1, opt->max_write_buffer_number);
-    // fprintf(stderr,"active_memtables:%lu",active_memtables);
-
-    uint64_t reserve_bytes =
-        wal_budget + (memtable_sz * active_memtables) + kSafety;
-
-    // 计算 optane_target，防止 underflow
-    uint64_t optane_target =
-        (optane_capacity > reserve_bytes)
-            ? (optane_capacity - reserve_bytes)
-            : (optane_capacity * 9 / 10);  // fallback: 至少留 10% 给系统
+    // // -------------------- Hard budget: reserve space on Optane
+    // // -------------------- 目的：让 SST 最多只能用 optane_target，永远留出 WAL
+    // // + memtable 峰值 + 元数据安全余量
+    // uint64_t wal_budget = opt->max_total_wal_size;  // 这里是 1GB
+    // uint64_t memtable_sz = opt->write_buffer_size;  // 这里是 128MB
+    // // Optane 总容量 optane_capacity 你已经算出来了
+    // const uint64_t kSafety = 512ULL * 1024 * 1024;  // 512MB 保险
+    // // RocksDB 峰值可能会同时持有多个 memtable（mutable + immutable + 等 flush
+    // // 的） 用 max_write_buffer_number 做保守估计（默认一般是 2）
+    // uint64_t active_memtables =
+    //     std::max<uint64_t>(1, opt->max_write_buffer_number);
+    // // fprintf(stderr,"active_memtables:%lu",active_memtables);
+    //
+    // uint64_t reserve_bytes =
+    //     wal_budget + (memtable_sz * active_memtables) + kSafety;
+    //
+    // // 计算 optane_target，防止 underflow
+    // uint64_t optane_target =
+    //     (optane_capacity > reserve_bytes)
+    //         ? (optane_capacity - reserve_bytes)
+    //         : (optane_capacity * 9 / 10);  // fallback: 至少留 10% 给系统
 
     // 日志：方便确认预算是否符合预期
     // fprintf(stderr,
@@ -487,7 +480,7 @@ void RocksdbDB::GetOptions(
     //         GB\n", optane_capacity, reserve_bytes, optane_target);
     // ---------------------------------------------------------------------------
 
-    opt->db_paths.emplace_back("/home/femu/mnt/optane", optane_target);
+    opt->db_paths.emplace_back("/home/femu/mnt/optane", optane_capacity);
 
     // [路径 1: ZNS SSD] (ZenFS 虚拟路径)
     // 承接所有溢出的冷数据 (L2, L3...)
