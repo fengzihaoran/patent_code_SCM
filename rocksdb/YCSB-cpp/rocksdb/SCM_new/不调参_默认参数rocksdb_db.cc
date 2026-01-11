@@ -424,38 +424,39 @@ void RocksdbDB::GetOptions(const utils::Properties &props, rocksdb::Options *opt
       }
     }
 
-    // -------------------- Hard budget: reserve space on Optane --------------------
-    // 目的：让 SST 最多只能用 optane_target，永远留出 WAL + memtable 峰值 + 元数据安全余量
-    uint64_t wal_budget = opt->max_total_wal_size;      // 这里是 1GB
-    uint64_t memtable_sz = opt->write_buffer_size;      // 这里是 128MB
-    // Optane 总容量 optane_capacity 你已经算出来了
-    const uint64_t kSafety = 512ULL * 1024 * 1024;      // 512MB 保险
-    // RocksDB 峰值可能会同时持有多个 memtable（mutable + immutable + 等 flush 的）
-    // 用 max_write_buffer_number 做保守估计（默认一般是 2）
-    uint64_t active_memtables = std::max<uint64_t>(1, opt->max_write_buffer_number);
-    // fprintf(stderr,"active_memtables:%lu",active_memtables);
-
-    uint64_t reserve_bytes = wal_budget + (memtable_sz * active_memtables) + kSafety;
-
-    // 计算 optane_target，防止 underflow
-    uint64_t optane_target =
-        (optane_capacity > reserve_bytes) ? (optane_capacity - reserve_bytes)
-                                          : (optane_capacity * 9 / 10); // fallback: 至少留 10% 给系统
+    // // -------------------- Hard budget: reserve space on Optane
+    // // -------------------- 目的：让 SST 最多只能用 optane_target，永远留出 WAL
+    // // + memtable 峰值 + 元数据安全余量
+    // uint64_t wal_budget = opt->max_total_wal_size;  // 这里是 1GB
+    // uint64_t memtable_sz = opt->write_buffer_size;  // 这里是 128MB
+    // // Optane 总容量 optane_capacity 你已经算出来了
+    // const uint64_t kSafety = 512ULL * 1024 * 1024;  // 512MB 保险
+    // // RocksDB 峰值可能会同时持有多个 memtable（mutable + immutable + 等 flush
+    // // 的） 用 max_write_buffer_number 做保守估计（默认一般是 2）
+    // uint64_t active_memtables =
+    //     std::max<uint64_t>(1, opt->max_write_buffer_number);
+    // // fprintf(stderr,"active_memtables:%lu",active_memtables);
+    //
+    // uint64_t reserve_bytes =
+    //     wal_budget + (memtable_sz * active_memtables) + kSafety;
+    //
+    // // 计算 optane_target，防止 underflow
+    // uint64_t optane_target =
+    //     (optane_capacity > reserve_bytes)
+    //         ? (optane_capacity - reserve_bytes)
+    //         : (optane_capacity * 9 / 10);  // fallback: 至少留 10% 给系统
 
     // 日志：方便确认预算是否符合预期
     // fprintf(stderr,
-    //         "[PatentLogic] Optane cap=%lu GB, reserve=%lu GB, target(SST)=%lu GB\n",
-    //         optane_capacity,
-    //         reserve_bytes,
-    //         optane_target);
+    //         "[PatentLogic] Optane cap=%lu GB, reserve=%lu GB, target(SST)=%lu
+    //         GB\n", optane_capacity, reserve_bytes, optane_target);
     // ---------------------------------------------------------------------------
 
-
-    opt->db_paths.emplace_back("/home/femu/mnt/optane", optane_target);
+    opt->db_paths.emplace_back("/home/femu/mnt/optane", optane_capacity);
 
     // [路径 1: ZNS SSD] (ZenFS 虚拟路径)
     // 承接所有溢出的冷数据 (L2, L3...)
-    opt->db_paths.emplace_back("/zenfs_data", 0); // 0 代表无限大
+    opt->db_paths.emplace_back("/zenfs_data", 0);  // 0 代表无限大
     // opt->wal_dir     = "/home/femu/mnt/optane/wal"; // WAL → Optane
     // opt->db_log_dir  = "/home/femu/mnt/optane/log"; // LOG → Optane
     /* [Patent Logic] */
