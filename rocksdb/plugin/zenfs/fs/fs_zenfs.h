@@ -19,12 +19,12 @@ namespace fs = std::filesystem;
 
 #include "io_zenfs.h"
 #include "metrics.h"
-#include "rocksdb/env.h"
-#include "rocksdb/file_system.h"
-#include "rocksdb/status.h"
 #include "snapshot.h"
 #include "version.h"
 #include "zbd_zenfs.h"
+#include "rocksdb/env.h"
+#include "rocksdb/file_system.h"
+#include "rocksdb/status.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -201,7 +201,9 @@ class ZenFS : public FileSystemWrapper {
 
   Status RecoverFrom(ZenMetaLog* log);
 
-  std::string ToAuxPath(std::string path);
+  std::string ToAuxPath(std::string path) {
+    return superblock_->GetAuxFsPath() + path;
+  }
 
   std::string ToZenFSPath(std::string aux_path) {
     std::string path = aux_path;
@@ -272,10 +274,6 @@ class ZenFS : public FileSystemWrapper {
                             IODebugContext* dbg, bool reopen);
 
  public:
-  // --- [Patent Logic Start] ---
-  virtual bool IsOptanePath(const std::string& path);
-  // --- [Patent Logic End] ---
-
   explicit ZenFS(ZonedBlockDevice* zbd, std::shared_ptr<FileSystem> aux_fs,
                  std::shared_ptr<Logger> logger);
   virtual ~ZenFS();
@@ -370,14 +368,6 @@ class ZenFS : public FileSystemWrapper {
                      IODebugContext* dbg) override {
     Debug(logger_, "CreatDir: %s to aux: %s\n", d.c_str(),
           ToAuxPath(d).c_str());
-
-    // --- [Patent Logic Start] ---
-    std::string dname = FormatPathLexically(d);
-    if (IsOptanePath(dname)) {
-      return target()->CreateDir(dname, options, dbg);
-    }
-    // --- [Patent Logic End] ---
-
     return target()->CreateDir(ToAuxPath(d), options, dbg);
   }
 
@@ -385,16 +375,6 @@ class ZenFS : public FileSystemWrapper {
                               IODebugContext* dbg) override {
     Debug(logger_, "CreatDirIfMissing: %s to aux: %s\n", d.c_str(),
           ToAuxPath(d).c_str());
-    // --- [Patent Logic Start] ---
-    std::string dname = FormatPathLexically(d);
-    if (IsOptanePath(dname)) {
-      // 这里的 fprintf 也很重要，看看是不是真的进了这个分支
-      // fprintf(stderr, "====== [DEBUG] CreatDirIfMissing: %s ======\n", d.c_str());
-      // ！！！关键点：这里绝对不能用 ToAuxPath，必须直接传 dname ！！！
-      return target()->CreateDirIfMissing(dname, options, dbg);
-    }
-    // --- [Patent Logic End] ---
-
     return target()->CreateDirIfMissing(ToAuxPath(d), options, dbg);
   }
 
