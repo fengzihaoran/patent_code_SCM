@@ -69,11 +69,14 @@ run_load_with_retry () {
 ########################################
 
 # 如果你希望每轮开始前都先 reset（更干净），取消注释下一行
-# reset_zenfs; sleep "${SLEEP_SEC}"
+reset_zenfs; sleep "${SLEEP_SEC}"
 
-# 1x 30M（你之前注释了，这里给你放着）
-# run_load_with_retry 30000000 "30M_run1" || true
-# reset_zenfs; sleep "${SLEEP_SEC}"
+# 3x 10M
+for i in 1 2 3; do
+  run_load_with_retry 10000000 "10M_scmNormalParam_load${i}" || true
+  reset_zenfs
+  sleep "${SLEEP_SEC}"
+done
 
 # 3x 20M
 for i in 1 2 3; do
