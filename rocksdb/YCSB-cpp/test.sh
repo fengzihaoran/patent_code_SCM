@@ -32,6 +32,7 @@ run_load_once () {
     -P "${WORKLOAD}" \
     -P "${ROCKS_PROPS}" \
     -p recordcount="${rc}" \
+    -p operationcount=5000000 \
     -threads "${THREADS}" \
     -s 2>&1 | tee "${logfile}"
   local rc_exit=${PIPESTATUS[0]}   # ycsb 进程的退出码
@@ -75,9 +76,23 @@ run_load_with_retry () {
 # run_load_with_retry 30000000 "30M_run1" || true
 # reset_zenfs; sleep "${SLEEP_SEC}"
 
-# 3x 40M
+# 3x 10M
 for i in 1 2 3; do
-  run_load_with_retry 30000000 "30M_run${i}" || true
+  run_load_with_retry 10000000 "10M_ZnH2SCMParam_run${i}" || true
+  reset_zenfs
+  sleep "${SLEEP_SEC}"
+done
+
+# 3x 20M
+for i in 1 2 3; do
+  run_load_with_retry 20000000 "20M_ZnH2SCMParam_run${i}" || true
+  reset_zenfs
+  sleep "${SLEEP_SEC}"
+done
+
+# 3x 30M
+for i in 1 2; do
+  run_load_with_retry 30000000 "30M_ZnH2SCMParam_run${i}" || true
   reset_zenfs
   sleep "${SLEEP_SEC}"
 done
