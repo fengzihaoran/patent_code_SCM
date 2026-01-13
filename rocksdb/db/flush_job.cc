@@ -47,7 +47,6 @@
 #include "util/mutexlock.h"
 #include "util/stop_watch.h"
 
-#include <sys/statvfs.h>
 namespace ROCKSDB_NAMESPACE {
 
 const char* GetFlushReasonString(FlushReason flush_reason) {
@@ -930,7 +929,6 @@ Status FlushJob::WriteLevel0Table() {
 
       TEST_SYNC_POINT_CALLBACK("FlushJob::WriteLevel0Table:output_compression",
                                &output_compression_);
-
       int64_t _current_time = 0;
       auto status = clock_->GetCurrentTime(&_current_time);
       // Safe to proceed even if GetCurrentTime fails. So, log and proceed.
@@ -975,133 +973,6 @@ Status FlushJob::WriteLevel0Table() {
           0 /* target_file_size */, meta_.fd.GetNumber());
       const SequenceNumber job_snapshot_seq =
           job_context_->GetJobSnapshotSequence();
-
-
-      // =================================================================================
-      // [Patent Logic] SCM-Aware Smooth Flush (Optimized for 1GB WAL & 16GB Optane)
-      // =================================================================================
-      const auto& cf_paths = cfd_->ioptions()->cf_paths;
-      // 仅当多路径且默认目标为 Optane (Path 0) 时执行
-      if (cf_paths.size() > 1 && meta_.fd.GetPathId() == 0) {
-          uint64_t free_space = 0;
-          // 使用 Env::Default() 绕过 ZenFS，获取 /home/femu/mnt/optane 的真实空间
-          Status s_space = rocksdb::Env::Default()->GetFreeSpace(cf_paths[0].path, &free_space);
-
-          if (s_space.ok()) {
-            // -----------------------------------------------------------------
-            // [Dynamic Thresholds] 动态计算阈值
-            // -----------------------------------------------------------------
-            // 足够安全 降低 Red 线：WAL 限制为 1GB
-            const uint64_t kRedThreshold = 1024ULL * 1024 * 1024 + 307ULL * 1024 * 1024;
-            static const uint64_t kYellowThreshold = [cf_paths]() {
-              uint64_t capacity = 0;
-              const char* env_scm_gb = std::getenv("SCM_GB");
-
-              if (env_scm_gb) {
-                // 1. 优先使用环境变量模拟的大小
-                capacity = std::stoull(env_scm_gb) * 1024 * 1024 * 1024;
-              } else {
-                // 2. 自动探测物理磁盘大小
-                struct statvfs stat;
-                // 这里可以直接硬编码挂载点，因为 Optane 路径通常是固定的
-                if (statvfs(cf_paths[0].path.c_str(), &stat) == 0) {
-                  capacity = (uint64_t)stat.f_blocks * stat.f_frsize;
-                } else {
-                  capacity = 16ULL * 1024 * 1024 * 1024; // Fallback 16GB
-                }
-              }
-
-              // 计算黄线 (20%)
-              uint64_t yellow = static_cast<uint64_t>(capacity * 0.20);
-
-              // 确保黄线在红线之上
-              if (yellow <= kRedThreshold) {
-                yellow = kRedThreshold + (100ULL * 1024 * 1024); // 至少比红线多 100MB
-              }
-
-              return yellow;
-            }();
-
-            auto clamp01 = [](double x) {
-              if (x < 0.0) return 0.0;
-              if (x > 1.0) return 1.0;
-              return x;
-            };
-
-            bool migrate_to_cold = false;
-
-            // 1. 获取最老数据时间 (用于判断这个 Memtable 是否在内存里赖了很久)
-            uint64_t oldest_time = meta_.oldest_ancester_time;
-            uint64_t flush_age =
-                (current_time > oldest_time) ? (current_time - oldest_time) : 0;
-
-            // 如果 Flush 的数据在内存里积压超过 240s，视为"温冷数据"，优先去ZNS
-            // ---- Adaptive age threshold (Compaction: more conservative) ----
-            const double kMaxAgeLimit = 260.0; // 压力小：允许驻留更久（4min）
-            const double kMinAgeLimit = 80.0;  // 压力大：更快判冷（1min）
-            const double kAgeRampSec  = 150.0; // 年龄分爬坡（2min 拉满）
-
-            // --- 决策状态机 ---
-            if (free_space < kRedThreshold) {
-              // [RED] 紧急避险：保护 WAL 写入，强制去 ZNS
-              migrate_to_cold = true;
-              ROCKS_LOG_WARN(db_options_.info_log,
-                             "[Flush] State: RED. Free: %" PRIu64
-                             " B (< 1GB). FORCE spillover.",
-                             free_space);
-            } else if (free_space < kYellowThreshold) {
-              // [YELLOW] 平滑迁移：空间越少，去 ZNS 概率越高
-              // Pressure 0.0 (剩2.5GB) -> 1.0 (剩0.5GB)
-              double pressure_score =
-                  1.0 - (double)(free_space - kRedThreshold) /
-                            (double)(kYellowThreshold - kRedThreshold);
-              pressure_score = clamp01(pressure_score);
-
-              double dyn_th = kMaxAgeLimit - pressure_score * (kMaxAgeLimit - kMinAgeLimit);
-              if (dyn_th < kMinAgeLimit) dyn_th = kMinAgeLimit;
-              if (dyn_th > kMaxAgeLimit) dyn_th = kMaxAgeLimit;
-
-              // age_score：冷只做“加成”，不要一票否决
-              double age_score = 0.0;
-              if ((double)flush_age > dyn_th) {
-                age_score = std::min(1.0, (double)(flush_age - dyn_th) / kAgeRampSec);
-              }
-
-              // 总分：压力主导（80%），冷度加成（20%）,flush主导压力,compaction可以更看“数据年龄”
-              double total_score = pressure_score * 0.8 + age_score * 0.2;
-              total_score = clamp01(total_score);
-
-              // 确定性采样 (Mod 100)
-              uint64_t sample = meta_.fd.GetNumber() % 100;
-              if (sample < (uint64_t)(total_score * 100)) {
-                migrate_to_cold = true;
-                ROCKS_LOG_INFO(db_options_.info_log,
-                "[Flush] YELLOW. P=%.2f A=%.2f Age=%" PRIu64 "s DynTh=%.0fs Score=%.2f -> spill",
-                pressure_score, age_score, flush_age, dyn_th, total_score);
-              }
-              // 触发条件：
-              // 1. 命中概率 (sample < pressure * 100)
-              // 2. 或者数据本身偏冷 (is_cold_flush) 且有一定压力 (pressure >
-              // 0.1)
-              // if (sample < (pressure * 100) ||
-              //     (is_cold_flush && pressure > 0.1)) {
-              //   migrate_to_cold = true;
-              //   ROCKS_LOG_INFO(
-              //       db_options_.info_log,
-              //       "[Flush] State: YELLOW. Pressure: %.2f, Age: %" PRIu64
-              //       "s. To ZNS.",
-              //       pressure, flush_age);
-              // }
-            }
-
-            if (migrate_to_cold) {
-              uint32_t path_cold = static_cast<uint32_t>(cf_paths.size() - 1);
-              meta_.fd = FileDescriptor(meta_.fd.GetNumber(), path_cold, 0);
-            }
-          }
-      }
-      // =================================================================================
-
 
       s = BuildTable(
           dbname_, versions_, db_options_, tboptions, file_options_,
@@ -1170,7 +1041,7 @@ Status FlushJob::WriteLevel0Table() {
     // Add file to L0
     edit_->AddFile(0 /* level */, meta_.fd.GetNumber(), meta_.fd.GetPathId(),
                    meta_.fd.GetFileSize(), meta_.smallest, meta_.largest,
-                   meta_.fd.smallest_seqno,  meta_.fd.largest_seqno,
+                   meta_.fd.smallest_seqno, meta_.fd.largest_seqno,
                    meta_.marked_for_compaction, meta_.temperature,
                    meta_.oldest_blob_file_number, meta_.oldest_ancester_time,
                    meta_.file_creation_time, meta_.epoch_number,

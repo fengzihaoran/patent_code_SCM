@@ -9,8 +9,6 @@
 
 #include "db/compaction/compaction_job.h"
 
-#include <sys/statvfs.h>
-
 #include <algorithm>
 #include <cinttypes>
 #include <memory>
@@ -58,6 +56,7 @@
 #include "table/unique_id_impl.h"
 #include "test_util/sync_point.h"
 #include "util/stop_watch.h"
+
 namespace ROCKSDB_NAMESPACE {
 
 const char* GetCompactionReasonString(CompactionReason compaction_reason) {
@@ -1054,10 +1053,12 @@ void CompactionJob::NotifyOnSubcompactionBegin(
     listener->OnSubcompactionBegin(info);
   }
   info.status.PermitUncheckedError();
+
 }
 
 void CompactionJob::NotifyOnSubcompactionCompleted(
     SubcompactionState* sub_compact) {
+
   if (db_options_.listeners.empty()) {
     return;
   }
@@ -1645,13 +1646,7 @@ Status CompactionJob::FinishCompactionOutputFile(
 
     // TODO(AR) it is not clear if there are any larger implications if
     // DeleteFile fails here
-    // Status ds = env_->DeleteFile(fname);
-
-    // --- [Patent Logic Start] ---
-    IOStatus io_ds = fs_->DeleteFile(fname, file_options_.io_options, nullptr);
-    Status ds = io_ds;
-    // --- [Patent Logic End] ---
-
+    Status ds = env_->DeleteFile(fname);
     if (!ds.ok()) {
       ROCKS_LOG_WARN(
           db_options_.info_log,
@@ -1683,15 +1678,7 @@ Status CompactionJob::FinishCompactionOutputFile(
   uint64_t oldest_blob_file_number = kInvalidBlobFileNumber;
   Status status_for_listener = s;
   if (meta != nullptr) {
-    // fname = GetTableFileName(meta->fd.GetNumber());
-
-    // --- [Patent Logic Start] ---
-    fname =
-        TableFileName(sub_compact->compaction->immutable_options()->cf_paths,
-                      meta->fd.GetNumber(), meta->fd.GetPathId());
-
-    // --- [Patent Logic End] ---
-
+    fname = GetTableFileName(meta->fd.GetNumber());
     output_fd = meta->fd;
     oldest_blob_file_number = meta->oldest_blob_file_number;
   } else {
@@ -1855,159 +1842,7 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
 
   // no need to lock because VersionSet::next_file_number_ is atomic
   uint64_t file_number = versions_->NewFileNumber();
-
-
-  // =================================================================================
-  // [Patent Logic] Dual-Modal Offloading (Space + Hotness)
-  // Adjusted for: L1=6GB, Optane=16GB, SST=128MB
-  // =================================================================================
-  const auto& cf_paths = compact_->compaction->immutable_options()->cf_paths;
-  uint32_t target_path_id = 0;
-  uint32_t path_cold =
-      (cf_paths.size() > 1) ? static_cast<uint32_t>(cf_paths.size() - 1) : 0;
-
-  // [Rule 1] L2+ (Cold Tiers) 强制去 ZNS
-  int out_level = sub_compact->compaction->output_level();
-  if (out_level >= 2) {
-    target_path_id = path_cold;
-  }
-  // [Rule 2] L0/L1 智能调度
-  else if (cf_paths.size() > 1) {
-    uint64_t free_space = 0;
-    // 必须用 Env::Default()
-    Status s_space =
-        rocksdb::Env::Default()->GetFreeSpace(cf_paths[0].path, &free_space);
-
-    // 寻找最老数据时间
-    uint64_t oldest_time = std::numeric_limits<uint64_t>::max();
-    int64_t cur_timeInt = 0;
-    db_options_.clock->GetCurrentTime(&cur_timeInt);
-    const uint64_t current_time = static_cast<uint64_t>(cur_timeInt);
-
-    for (size_t i = 0; i < sub_compact->compaction->num_input_levels(); i++) {
-      if (sub_compact->compaction->num_input_files(i) > 0) {
-        const auto& inputs = *sub_compact->compaction->inputs(i);
-        for (const auto* f : inputs) {
-          if (f->oldest_ancester_time != 0 &&
-              f->oldest_ancester_time < oldest_time) {
-            oldest_time = f->oldest_ancester_time;
-          }
-        }
-      }
-    }
-    uint64_t data_age_sec =
-        (oldest_time != std::numeric_limits<uint64_t>::max() &&
-         current_time > oldest_time)
-            ? (current_time - oldest_time)
-            : 0;
-
-    if (s_space.ok()) {
-      // [Tuned Param] 1.3GB: 适配 1GB WAL 限制
-      const uint64_t kRedThreshold = 1024ULL * 1024 * 1024 + 307ULL * 1024 * 1024;
-      bool migrate = false;
-      // [Tuned Param] 1.5GB: 适配 2GB L1 Base
-      // [Yellow]: 动态设定为总容量的 40%
-      // 4GB -> 1.6GB (接近之前的 1.5GB)
-      // 2GB -> 800MB
-      // 1GB -> 400MB (此时 Yellow < Red，意味着全程 Red，符合预期)
-      // -----------------------------------------------------------------
-      // [Dynamic Thresholds] 动态计算阈值
-      // -----------------------------------------------------------------
-      static const uint64_t kYellowThreshold = [cf_paths]() {
-        uint64_t capacity = 0;
-        const char* env_scm_gb = std::getenv("SCM_GB");
-
-        if (env_scm_gb) {
-          // 1. 优先使用环境变量模拟的大小
-          capacity = std::stoull(env_scm_gb) * 1024 * 1024 * 1024;
-        } else {
-          // 2. 自动探测物理磁盘大小
-          struct statvfs stat;
-          // 这里可以直接硬编码挂载点，因为 Optane 路径通常是固定的
-          if (statvfs(cf_paths[0].path.c_str(), &stat) == 0) {
-            capacity = (uint64_t)stat.f_blocks * stat.f_frsize;
-          } else {
-            capacity = 16ULL * 1024 * 1024 * 1024;  // Fallback 16GB
-          }
-        }
-
-        // 计算黄线 (20%)
-        uint64_t yellow = static_cast<uint64_t>(capacity * 0.20);
-
-        // 确保黄线在红线之上
-        if (yellow <= kRedThreshold) {
-          yellow =
-              kRedThreshold + (100ULL * 1024 * 1024);  // 至少比红线多 100MB
-        }
-
-        return yellow;
-      }();
-
-      auto clamp01 = [](double x) {
-        if (x < 0.0) return 0.0;
-        if (x > 1.0) return 1.0;
-        return x;
-      };
-
-      // 1. 空间分
-      if (free_space < kRedThreshold) {
-        // [RED State] 红色保命：无条件强制迁移
-        migrate = true;
-        ROCKS_LOG_WARN(db_options_.info_log,
-                       "[Tiering] RED. Force Spill. Free: %" PRIu64,
-                       free_space);
-      } else if (free_space < kYellowThreshold) {
-        // ---- Adaptive age threshold (Compaction: more conservative) ----
-        const double kMaxAgeLimit = 360.0; // 压力小：允许驻留更久（6min）
-        const double kMinAgeLimit = 120.0;  // 压力大：更快判冷（1.5min）
-        const double kAgeRampSec  = 210.0; // 年龄分爬坡（3min 拉满）
-        // [YELLOW State] 黄色拥塞控制：边拥塞边挪走
-        // 计算压力分 (0.0 ~ 1.0)
-        double pressure_score =
-            1.0 - (double)(free_space - kRedThreshold) /
-                      (double)(kYellowThreshold - kRedThreshold);
-        pressure_score = clamp01(pressure_score);
-
-        double dyn_th =
-            kMaxAgeLimit - pressure_score * (kMaxAgeLimit - kMinAgeLimit);
-        if (dyn_th < kMinAgeLimit) dyn_th = kMinAgeLimit;
-        if (dyn_th > kMaxAgeLimit) dyn_th = kMaxAgeLimit;
-
-        // 计算年龄分 (只有超过 4分钟 才有分)
-        double age_score = 0.0;
-        if ((double)data_age_sec > dyn_th) {
-          age_score =
-              std::min(1.0, (double)(data_age_sec - dyn_th) / kAgeRampSec);
-        }
-        // 综合打分：在 Yellow 状态下，即使数据不老，只要压力大也要被迫挪走
-        double total_score = (pressure_score * 0.6) + (age_score * 0.4);
-        total_score = clamp01(total_score);
-        // 采样决策
-        uint64_t sample = file_number % 100;
-        if (sample < (total_score * 100)) {
-          migrate = true;
-          ROCKS_LOG_INFO(db_options_.info_log,
-                         "[Tiering] YELLOW(compaction). P=%.2f A=%.2f "
-                         "DynTh=%.0fs Age=%" PRIu64 "s -> Migrating",
-                         pressure_score, age_score, dyn_th, data_age_sec);
-        }
-      }
-
-      if (migrate) {
-        target_path_id = path_cold;
-      }
-    }
-  }
-
-  // sub_compact->compaction->SetOutputPathId(target_path_id);
-  // meta.fd = FileDescriptor(file_number, target_path_id, 0);
-  std::string fname = TableFileName(cf_paths, file_number, target_path_id);
-  ROCKS_LOG_INFO(db_options_.info_log,
-                 "[Paper Debug] Generated SST: Level=%d, Path=%d, File=%s",
-                 out_level, target_path_id, fname.c_str());
-  // =================================================================================
-
-
+  std::string fname = GetTableFileName(file_number);
   // Fire events.
   ColumnFamilyData* cfd = sub_compact->compaction->column_family_data();
   EventHelpers::NotifyTableFileCreationStarted(
@@ -2090,13 +1925,8 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
   uint64_t epoch_number = sub_compact->compaction->MinInputFileEpochNumber();
   {
     FileMetaData meta;
-    // meta.fd = FileDescriptor(file_number,
-    //                          sub_compact->compaction->output_path_id(), 0);
-
-    // --- [Patent Logic Start] ---
-    meta.fd = FileDescriptor(file_number, target_path_id, 0);
-    // --- [Patent Logic End] ---
-
+    meta.fd = FileDescriptor(file_number,
+                             sub_compact->compaction->output_path_id(), 0);
     meta.oldest_ancester_time = oldest_ancester_time;
     meta.file_creation_time = current_time;
     meta.epoch_number = epoch_number;
