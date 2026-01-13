@@ -77,13 +77,13 @@ run_load_with_retry () {
 
 # 3x 40M
 for i in 1 2 3; do
-  run_load_with_retry 40000000 "40M_run${i}" || true
+  run_load_with_retry 30000000 "30M_run${i}" || true
   reset_zenfs
   sleep "${SLEEP_SEC}"
 done
 
-# 1x 50M
-run_load_with_retry 50000000 "50M_run1" || true
-reset_zenfs
+## 1x 50M
+#run_load_with_retry 50000000 "50M_run1" || true
+#reset_zenfs
 
 echo "OKOKOK!!!"
