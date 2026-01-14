@@ -1,4 +1,3 @@
-我只执行load，现在正确了吗？
 #!/usr/bin/env bash
 set -euo pipefail
 
