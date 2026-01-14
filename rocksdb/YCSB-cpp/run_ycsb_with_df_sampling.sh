@@ -17,7 +17,7 @@ STATUS_INTERVAL=2            # 秒
 MOUNT_POINT="/home/femu/mnt/optane"
 RUNS=3
 
-SCHEME_NAME="ours_default"   # 用于命名：znH2_default / ours_full / naive_scm 等
+SCHEME_NAME="ours_full"   # 用于命名：znH2_default / ours_full / naive_scm 等
 OUTDIR="logs"
 
 # =========================
@@ -38,7 +38,7 @@ reset_zenfs () {
     cd "${YCSB_DIR}/.."
     mkdir -p "${YCSB_DIR}/logs"
     echo "[`date '+%F %T'`] reset zenfs..."
-    ./zenfs_setup.sh 2>&1 | tee -a "${YCSB_DIR}/logs/zenfs_setup_$(date +%Y%m%d).log"
+    ./zenfs_setup.sh 2>&1 | tee -a "${YCSB_DIR}/logs/zenfs_setup_$(date +%Y%m%d).log"``
   )
 }
 
