@@ -1,61 +1,95 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 用法示例：
-# ./run_ycsb_with_df_sampling.sh \
-#   "stdbuf -oL -eL /home/femu/rocksdb/cmake-build-release/YCSB-cpp/ycsb -load -db rocksdb -P workloads/workloada -P rocksdb/rocksdb.properties -p recordcount=30000000 -threads 16 -p status.interval=2 -s" \
-#   /home/femu/mnt/optane \
-#   2 \
-#   logs/ours_load30M_t16
+# =========================
+# 可配置参数（你常改的都在这）
+# =========================
+YCSB_BIN="/home/femu/rocksdb/YCSB-cpp/ycsb"
+WORKLOAD="workloads/workloada"
+PROP_FILE="rocksdb/rocksdb.properties"
+YCSB_DIR="/home/femu/rocksdb/YCSB-cpp"
 
-#YCSB_CMD="$1"
-#MOUNT_POINT="$2"
-#INTERVAL_SEC="$3"
-#OUT_PREFIX="$4"
-
-YCSB_CMD="stdbuf -oL -eL /home/femu/rocksdb/YCSB-cpp/ycsb -load -db rocksdb -P workloads/workloada -P rocksdb/rocksdb.properties -p recordcount=30000000 -threads 16 -p status.interval=2 -s"
+PHASE="load"                 # load 或 run
+RECORDCOUNT=30000000         # load 用
+OPCOUNT=5000000             # run 用（如果 PHASE=run）
+THREADS=16
+STATUS_INTERVAL=2            # 秒
 MOUNT_POINT="/home/femu/mnt/optane"
-INTERVAL_SEC="2"
-OUT_PREFIX="logs/ours_SCMFULL_load30M_t16"
+RUNS=3
 
-mkdir -p "$(dirname "$OUT_PREFIX")"
+SCHEME_NAME="ours_full"   # 用于命名：znH2_default / ours_full / naive_scm 等
+OUTDIR="logs"
 
-LOG_FILE="${OUT_PREFIX}.log"
-DF_CSV="${OUT_PREFIX}_df.csv"
-
-echo "log_file=$LOG_FILE"
-echo "df_csv=$DF_CSV"
-echo "mount=$MOUNT_POINT"
-echo "interval=$INTERVAL_SEC sec"
-
-# 先后台启动 ycsb（输出 tee 到 log）
-bash -c "$YCSB_CMD" 2>&1 | tee "$LOG_FILE" &
-YCSB_PID=$!
-echo "ycsb_pid=$YCSB_PID"
-
-# 写 CSV 表头
-echo "ts_epoch,ts_iso,mount,used_bytes,avail_bytes,total_bytes,used_pct" > "$DF_CSV"
-
-# df 采样循环：只要 ycsb 还活着就一直采
-while kill -0 "$YCSB_PID" 2>/dev/null; do
-  TS_EPOCH=$(date +%s)
-  TS_ISO=$(date "+%F %T")
-
-  LINE=$(df -B1 "$MOUNT_POINT" | tail -n 1 || true)
-  if [[ -n "$LINE" ]]; then
-    TOTAL=$(echo "$LINE" | awk '{print $2}')
-    USED=$(echo  "$LINE" | awk '{print $3}')
-    AVAIL=$(echo "$LINE" | awk '{print $4}')
-    USEP=$(echo  "$LINE" | awk '{print $5}' | tr -d '%')
-
-    echo "${TS_EPOCH},\"${TS_ISO}\",\"${MOUNT_POINT}\",${USED},${AVAIL},${TOTAL},${USEP}" >> "$DF_CSV"
+# =========================
+# 组装 YCSB 命令
+# =========================
+build_cmd() {
+  if [[ "$PHASE" == "load" ]]; then
+    echo "stdbuf -oL -eL $YCSB_BIN -load -db rocksdb -P $WORKLOAD -P $PROP_FILE -p recordcount=$RECORDCOUNT -threads $THREADS -p status.interval=$STATUS_INTERVAL -s"
+  else
+    echo "stdbuf -oL -eL $YCSB_BIN -run -db rocksdb -P $WORKLOAD -P $PROP_FILE -p operationcount=$OPCOUNT -threads $THREADS -p status.interval=$STATUS_INTERVAL -s"
   fi
+}
 
-  sleep "$INTERVAL_SEC"
+mkdir -p "$OUTDIR"
+
+reset_zenfs () {
+  (
+    cd "${YCSB_DIR}/.."
+    mkdir -p "${YCSB_DIR}/logs"
+    echo "[`date '+%F %T'`] reset zenfs..."
+    ./zenfs_setup.sh 2>&1 | tee -a "${YCSB_DIR}/logs/zenfs_setup_$(date +%Y%m%d).log"``
+  )
+}
+
+
+for i in $(seq 2 "$RUNS"); do
+  reset_zenfs
+  sleep 500
+
+  TS="$(date +%Y%m%d_%H%M%S)"
+  PREFIX="${OUTDIR}/${SCHEME_NAME}_${PHASE}_rc${RECORDCOUNT}_oc${OPCOUNT}_t${THREADS}_i${STATUS_INTERVAL}_run${i}_${TS}"
+
+  LOG_FILE="${PREFIX}.log"
+  DF_CSV="${PREFIX}_df.csv"
+
+  echo "=== Run $i/$RUNS ==="
+  echo "log_file=$LOG_FILE"
+  echo "df_csv=$DF_CSV"
+
+  YCSB_CMD="$(build_cmd)"
+  echo "cmd=$YCSB_CMD" | tee "${PREFIX}_cmd.txt"
+
+  # 启动 ycsb（后台），同时 tee 到 log
+  bash -c "$YCSB_CMD" 2>&1 | tee "$LOG_FILE" &
+  YCSB_PID=$!
+
+  # df 采样 CSV 表头
+  echo "ts_epoch,ts_iso,mount,used_bytes,avail_bytes,total_bytes,used_pct" > "$DF_CSV"
+
+  # 采样直到 ycsb 结束
+  while kill -0 "$YCSB_PID" 2>/dev/null; do
+    TS_EPOCH=$(date +%s)
+    TS_ISO=$(date "+%F %T")
+
+    LINE=$(df -B1 "$MOUNT_POINT" | tail -n 1 || true)
+    if [[ -n "$LINE" ]]; then
+      TOTAL=$(echo "$LINE" | awk '{print $2}')
+      USED=$(echo  "$LINE" | awk '{print $3}')
+      AVAIL=$(echo "$LINE" | awk '{print $4}')
+      USEP=$(echo  "$LINE" | awk '{print $5}' | tr -d '%')
+      echo "${TS_EPOCH},\"${TS_ISO}\",\"${MOUNT_POINT}\",${USED},${AVAIL},${TOTAL},${USEP}" >> "$DF_CSV"
+    fi
+
+    sleep "$STATUS_INTERVAL"
+  done
+
+  wait "$YCSB_PID" || true
+  echo "Done run $i. Saved $LOG_FILE and $DF_CSV"
+  echo
+
 done
 
-wait "$YCSB_PID" || true
-echo "Done."
-echo "Saved:"
-echo "  $LOG_FILE"
-echo "  $DF_CSV"
+echo "All done. Logs in: $OUTDIR"
+#!/usr/bin/env bash
+set -euo pipefail
