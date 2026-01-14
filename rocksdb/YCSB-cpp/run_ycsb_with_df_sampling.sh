@@ -43,7 +43,7 @@ reset_zenfs () {
 }
 
 
-for i in $(seq 2 "$RUNS"); do
+for i in $(seq 1 "$RUNS"); do
   reset_zenfs
   sleep 500
 
