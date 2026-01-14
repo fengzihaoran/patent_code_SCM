@@ -12,7 +12,7 @@ YCSB_DIR="/home/femu/rocksdb/YCSB-cpp"
 PHASE="load"                 # load 或 run
 RECORDCOUNT=30000000         # load 用
 OPCOUNT=5000000             # run 用（如果 PHASE=run）
-THREADS=16
+THREADS=8
 STATUS_INTERVAL=2            # 秒
 MOUNT_POINT="/home/femu/mnt/optane"
 RUNS=3
@@ -43,9 +43,9 @@ reset_zenfs () {
 }
 
 
-for i in $(seq 1 "$RUNS"); do
+for i in $(seq 3 "$RUNS"); do
   reset_zenfs
-  sleep 500
+  sleep 300
 
   TS="$(date +%Y%m%d_%H%M%S)"
   PREFIX="${OUTDIR}/${SCHEME_NAME}_${PHASE}_rc${RECORDCOUNT}_oc${OPCOUNT}_t${THREADS}_i${STATUS_INTERVAL}_run${i}_${TS}"

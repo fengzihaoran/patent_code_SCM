@@ -1902,8 +1902,8 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
             : 0;
 
     if (s_space.ok()) {
-      // [Tuned Param] 1.3GB: 适配 1GB WAL 限制
-      const uint64_t kRedThreshold = 1024ULL * 1024 * 1024 + 307ULL * 1024 * 1024;
+      // [Tuned Param] 1.4GB: 适配 1GB WAL 限制
+      const uint64_t kRedThreshold = (7ULL * 1024ULL * 1024ULL * 1024ULL) / 5ULL;  // = 1503238553 bytes
       bool migrate = false;
       // [Tuned Param] 1.5GB: 适配 2GB L1 Base
       // [Yellow]: 动态设定为总容量的 40%

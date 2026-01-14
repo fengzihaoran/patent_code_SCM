@@ -992,7 +992,7 @@ Status FlushJob::WriteLevel0Table() {
             // [Dynamic Thresholds] 动态计算阈值
             // -----------------------------------------------------------------
             // 足够安全 降低 Red 线：WAL 限制为 1GB
-            const uint64_t kRedThreshold = 1024ULL * 1024 * 1024 + 307ULL * 1024 * 1024;
+            const uint64_t kRedThreshold = (7ULL * 1024ULL * 1024ULL * 1024ULL) / 5ULL;  // = 1503238553 bytes
             static const uint64_t kYellowThreshold = [cf_paths]() {
               uint64_t capacity = 0;
               const char* env_scm_gb = std::getenv("SCM_GB");

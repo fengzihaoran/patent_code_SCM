@@ -457,18 +457,19 @@ void RocksdbDB::GetOptions(
     // // + memtable 峰值 + 元数据安全余量
     // uint64_t wal_budget = opt->max_total_wal_size;  // 这里是 1GB
     // uint64_t memtable_sz = opt->write_buffer_size;  // 这里是 128MB
-    // // Optane 总容量 optane_capacity 你已经算出来了
-    // const uint64_t kSafety = 512ULL * 1024 * 1024;  // 512MB 保险
-    // // RocksDB 峰值可能会同时持有多个 memtable（mutable + immutable + 等 flush
-    // // 的） 用 max_write_buffer_number 做保守估计（默认一般是 2）
+    // Optane 总容量 optane_capacity 你已经算出来了
+    // const uint64_t kSafety = 256ULL * 1024 * 1024;  // 512MB 保险
+    // RocksDB 峰值可能会同时持有多个 memtable（mutable + immutable + 等 flush
+    // 的） 用 max_write_buffer_number 做保守估计（默认一般是 2）
     // uint64_t active_memtables =
     //     std::max<uint64_t>(1, opt->max_write_buffer_number);
-    // // fprintf(stderr,"active_memtables:%lu",active_memtables);
-    //
+    // fprintf(stderr,"active_memtables:%lu",active_memtables);
+
     // uint64_t reserve_bytes =
     //     wal_budget + (memtable_sz * active_memtables) + kSafety;
-    //
-    // // 计算 optane_target，防止 underflow
+    // uint64_t reserve_bytes = kSafety;
+
+    // 计算 optane_target，防止 underflow
     // uint64_t optane_target =
     //     (optane_capacity > reserve_bytes)
     //         ? (optane_capacity - reserve_bytes)
