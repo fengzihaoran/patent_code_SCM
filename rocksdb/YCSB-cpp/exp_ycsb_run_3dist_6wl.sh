@@ -6,6 +6,10 @@ set -euo pipefail
 #   dist in {zipfian, uniform, latest}
 #   workload in {A,B,C,D,E,F}
 # For ONE scheme at a time (you switch code/config manually)
+  #SCHEME_NAME=znh2_default ENABLE_DF=0 ./exp_ycsb_run_3dist_6wl.sh
+  #SCHEME_NAME=znh2_tuned   ENABLE_DF=0 ./exp_ycsb_run_3dist_6wl.sh
+  #SCHEME_NAME=ours_default ENABLE_DF=1 ./exp_ycsb_run_3dist_6wl.sh
+  #SCHEME_NAME=ours_tuned   ENABLE_DF=1 ./exp_ycsb_run_3dist_6wl.sh
 # ==========================================
 
 # --------- Paths (adjust if needed) ---------
