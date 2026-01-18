@@ -4,6 +4,8 @@ set -euo pipefail
 # =========================
 # Experiment: RUN comparison (4 schemes)
 # Command: -load -run
+# SCHEME_NAME=ours_tuned   ENABLE_DF=1 ./exp_run_workloada_rc20M_oc5M_t16.sh
+# 小技巧：znh2 没 SCM，ENABLE_DF=0 能少生成垃圾 csv。
 # =========================
 
 # ---- Basic paths (adjust if needed) ----
